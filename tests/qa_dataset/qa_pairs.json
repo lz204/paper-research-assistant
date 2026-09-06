@@ -1,0 +1,115 @@
+[
+  {
+    "qa_id": "q1",
+    "paper_id": "sample_paper_1",
+    "question": "Transformer 模型的注意力公式是什么？请给出完整数学形式。",
+    "answer_type": "formula",
+    "gold_answer": "Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_1#1.0", "ref_text": "Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V"}
+    ],
+    "formula_expectation": [
+      "softmax",
+      "Q",
+      "K",
+      "V",
+      "sqrt",
+      "d_k"
+    ]
+  },
+  {
+    "qa_id": "q2",
+    "paper_id": "sample_paper_1",
+    "question": "Transformer 在 WMT 2014 英德翻译任务上的 BLEU 分数是多少？",
+    "answer_type": "number",
+    "gold_answer": "28.4 BLEU",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_1#2.0", "ref_text": "the Transformer (Big) achieves 28.4 BLEU"}
+    ],
+    "tolerance_relative": 0.1
+  },
+  {
+    "qa_id": "q3",
+    "paper_id": "sample_paper_1",
+    "question": "ImageNet-1K 上用 Transformer 做的视觉分类模型 top-5 准确率是多少？比 ResNet-152 高多少？",
+    "answer_type": "compare",
+    "gold_answer": "Transformer 85.6%，ResNet-152 82.3%，高约 3.3 个百分点。",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_1#0.1", "ref_text": "achieves 85.6% top-5 accuracy ... ResNet-152 82.3%"}
+    ]
+  },
+  {
+    "qa_id": "q4",
+    "paper_id": "sample_paper_2",
+    "question": "BERT 的两个预训练目标是什么？各自的作用？",
+    "answer_type": "list",
+    "gold_answer": "(1) Masked Language Modeling (MLM)：双向上下文的掩码词预测，产生深度双向表示；(2) Next Sentence Prediction (NSP)：二分类判断 B 句是否在原文中跟在 A 句之后，捕捉句间关系。",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_2#1.0", "ref_text": "(1) Masked Language Modeling (MLM) — bidirectional representation. (2) Next Sentence Prediction (NSP) — binary classification"}
+    ],
+    "expected_keywords": ["Masked Language Modeling", "MLM", "Next Sentence Prediction", "NSP"]
+  },
+  {
+    "qa_id": "q5",
+    "paper_id": "sample_paper_2",
+    "question": "BERT_LARGE 在 GLUE benchmark 上的平均得分是多少？",
+    "answer_type": "number",
+    "gold_answer": "80.5%",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_2#2.0", "ref_text": "BERT_LARGE achieves 80.5% average score"}
+    ],
+    "tolerance_relative": 0.05
+  },
+  {
+    "qa_id": "q6",
+    "paper_id": "sample_paper_2",
+    "question": "移除 NSP 目标会导致什么效果变化？为什么？",
+    "answer_type": "analysis",
+    "gold_answer": "移除 NSP 会导致 SWAG 准确率下降 0.7%，SQuAD 下降 0.4%。NSP 引入的句间关系信息对跨句推理任务有贡献，去除后模型失去显式学习句间连贯信号的通道，导致相关任务退化。",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_2#3.0", "ref_text": "Removing NSP objective causes a 0.7% drop on SWAG accuracy and 0.4% drop on SQuAD"}
+    ]
+  },
+  {
+    "qa_id": "q7",
+    "paper_id": "sample_paper_3",
+    "question": "Swin Transformer 使用了什么技术解决 ViT 高分辨率计算复杂度过高的问题？",
+    "answer_type": "method",
+    "gold_answer": "Swin Transformer 使用移位窗口（Shifted Window）分区策略：奇数层局部窗口内自注意力，偶数层窗口向右下移位，让相邻窗口信息流通，同时复杂度保持线性。",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_3#0.1", "ref_text": "shifted window partitioning scheme, where self-attention is computed locally within non-overlapping windows, and information flows between adjacent windows via the shifted configuration"},
+      {"chunk_id": "sample_paper_3#1.0", "ref_text": "shifted window design in even-indexed Transformer blocks ... enabling cross-window connections without excessive cost"}
+    ]
+  },
+  {
+    "qa_id": "q8",
+    "paper_id": "sample_paper_3",
+    "question": "Swin-Large 在 ImageNet-1K top-1 准确率是多少？",
+    "answer_type": "number",
+    "gold_answer": "86.4%",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_3#0.0", "ref_text": "achieves 86.4% top-1 accuracy on ImageNet-1K classification"},
+      {"chunk_id": "sample_paper_3#2.0", "ref_text": "Swin-B 86.4%"}
+    ]
+  },
+  {
+    "qa_id": "q9",
+    "paper_id": "sample_paper_1",
+    "question": "Transformer 多头注意力中总模型维度和单头维度分别是多少？有几个头？",
+    "answer_type": "numbers",
+    "gold_answer": "d_model = 512，单头 d_k = 64，共 8 个头。",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_1#1.0", "ref_text": "For a single head: d_k = 64; for the 8-head ensemble, the total model dimension is d_model = 512"}
+    ]
+  },
+  {
+    "qa_id": "q10",
+    "paper_id": "sample_paper_3",
+    "question": "Swin Transformer 各个尺寸的参数量是多少？",
+    "answer_type": "list",
+    "gold_answer": "Swin-Tiny 28M、Swin-Small 50M、Swin-Base 88M、Swin-Large 197M。",
+    "gold_citations": [
+      {"chunk_id": "sample_paper_3#2.0", "ref_text": "Swin-Tiny (28M), Swin-Small (50M), Swin-Base (88M), Swin-Large (197M)"}
+    ]
+  }
+]

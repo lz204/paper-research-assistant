@@ -1,0 +1,67 @@
+# Sample Paper 1: Attention Is All You Need（论文版 MD）
+# 文档 6.4 节数据集样例：涵盖 方法/性能/架构 3 类问题
+# 用于本地 mock 模式评测，不依赖真实 PDF
+
+paper_id: sample_paper_1
+title: "Attention Is All You Need"
+year: 2017
+authors: "Vaswani et al."
+url: "https://arxiv.org/abs/1706.03762"
+keywords: ["Transformer", "Self-Attention", "Multi-Head", "Machine Translation"]
+
+# 正文（按 chunk 分段，模拟 chunker 输出）
+chunks:
+  - chunk_id: "sample_paper_1#0.0"
+    section: "Introduction"
+    text: |
+      The dominant sequence transduction models are based on complex recurrent or
+      convolutional neural networks that include an encoder and a decoder. We propose
+      a new simple network architecture, the Transformer, based solely on attention
+      mechanisms, dispensing with recurrence and convolutions entirely. Experiments
+      on two machine translation tasks show these models to be superior in quality
+      while being more parallelizable and requiring significantly less time to train.
+  - chunk_id: "sample_paper_1#0.1"
+    section: "Background"
+    text: |
+      Extending the Transformer to ImageNet classification: our model achieves 85.6%
+      top-5 accuracy on ImageNet-1K, significantly outperforming prior CNN
+      architectures (ResNet-152 82.3%) with 40% fewer parameters.
+      Our model uses a SwinTransformer backbone achieving F1=0.92 on COCO-2017
+      for object detection, and BLEU=27.3 on the WMT 2014 English-to-German
+      translation task.
+  - chunk_id: "sample_paper_1#1.0"
+    section: "Method"
+    text: |
+      The Transformer architecture follows an encoder-decoder structure using stacked
+      self-attention and point-wise, fully connected layers. Multi-head attention
+      allows the model to jointly attend to information from different representation
+      subspaces at different positions. The core attention formula is:
+
+          Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
+
+      For a single head: d_k = 64; for the 8-head ensemble, the total model dimension
+      is d_model = 512 with residual connections and LayerNorm applied at each sublayer.
+      We use positional encoding with sine and cosine functions of different frequencies.
+  - chunk_id: "sample_paper_1#1.1"
+    section: "Training"
+    text: |
+      Training regime: Adam optimizer with beta1=0.9, beta2=0.98, epsilon=1e-9.
+      Batch size 256, 100K steps on WMT 2014 En-De. Total training cost ~ 18 hours
+      on 8 V100 GPUs. ResNet-style skip connections reduce vanishing gradients,
+      letting the model converge faster with a learning rate warmup followed by
+      inverse square root decay.
+  - chunk_id: "sample_paper_1#2.0"
+    section: "Results"
+    text: |
+      WMT 2014 English-to-German translation task: the Transformer (Big) achieves
+      28.4 BLEU, improving over the previously reported SOTA (ensemble of models)
+      by more than 2.0 BLEU. On English-to-French translation, our model achieves
+      41.0 BLEU at a fraction of the training cost compared to SOTA models.
+  - chunk_id: "sample_paper_1#3.0"
+    section: "Conclusion"
+    text: |
+      In this work, we presented the Transformer, the first sequence transduction
+      model based entirely on attention, replacing the recurrent layers most commonly
+      used in encoder-decoder architectures with multi-headed self-attention.
+      We have shown that this architecture significantly improves both performance
+      and training efficiency on translation tasks.

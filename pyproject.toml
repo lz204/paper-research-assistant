@@ -1,0 +1,48 @@
+# =====================================================================
+# 项目工程化配置（pytest / coverage / ruff / mypy）
+# 文档 6.4 节：核心模块覆盖率 > 85%；企业级工程化配套。
+# 安装开发依赖：pip install -r requirements-dev.txt
+# =====================================================================
+
+[tool.pytest.ini_options]
+# 收集 tests 下真正的 pytest 测试（test_*.py）。
+# 说明：tests/unit/verify_*.py 是独立可跑脚本（python tests/unit/verify_*.py），
+#       部分函数带 doc_chunks 等参数，pytest 会把它们误判为 fixture，
+#       因此不纳入 pytest 收集，仍由 Makefile/CI 以脚本方式执行。
+testpaths = ["tests/unit"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q"
+# 使 pytest 直接 import app.* 无需手动改 sys.path
+pythonpath = ["."]
+log_cli = false
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = [
+    "app/*/__init__.py",
+    "app/frontend/*",        # Streamlit UI 层不在单测覆盖范围
+    "app/api/*",             # API 层由 e2e TestClient 覆盖
+]
+
+[tool.coverage.report]
+# 文档 6.4 节：核心模块（context_manager / fusion_engine / citation_verifier）> 85%
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["logs", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501 行长：本项目 docstring 较长；B008 延迟默认值：FastAPI Depends 常用
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.13"
+# dashscope / streamlit 等无类型存根，允许缺失
+ignore_missing_imports = true
+check_untyped_defs = true

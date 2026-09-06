@@ -1,0 +1,34 @@
+# 依赖锁定（直接依赖精确版本，由 requirements.txt 约束派生）
+# 由本地已验证环境生成；安装：pip install -r requirements.lock
+# 注意：若需升级依赖，先改 requirements.txt 再用 pip-compile 重新生成，
+# 并保持 httpx<0.28（starlette<0.37 的 TestClient 在 httpx>=0.28 下不兼容）。
+
+python-dotenv==1.0.1
+pyyaml==6.0.2
+numpy==2.4.3
+scikit-learn==1.8.0
+regex==2026.7.19
+dashscope==1.26.5
+# PDF 解析（本机未安装，CI/部署环境按需补充）
+# pdf2image>=1.17
+# pdfplumber>=0.11
+pymupdf==1.25.5
+rank-bm25==0.2.2
+# spacy 可选（未装时实体抽取降级纯正则）
+# spacy>=3.7
+python-docx==1.2.0
+# structlog / langfuse 可选（未装时分别降级 StdJsonLogger / MockLangfuseClient）
+# structlog>=24.1
+# langfuse>=2.57
+fastapi==0.110.0
+starlette==0.36.3
+uvicorn==0.30.6
+pydantic==2.10.4
+httpx==0.27.2
+# streamlit / plotly 可选（前端容器按需补充）
+# streamlit>=1.37
+# plotly>=5.22
+pandas==3.0.1
+# rouge-score 可选（未装时评测用自实现 Rouge-L）
+# rouge-score>=0.1.2
+nltk==3.10.0

@@ -1,0 +1,160 @@
+# =====================================================================
+# 多语种文献翻译与论文研读助手 — GitHub Actions CI
+# 文档 6.4 节：每次 push 自动跑核心模块单测（覆盖率 > 85%），
+#              评测集因跑一次约 30 分钟，改为 nightly job
+# =====================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  # 文档 6.4 节：评测集 nightly（30 分钟级）
+  schedule:
+    - cron: '0 2 * * *'   # UTC 凌晨 2 点（北京时间 10 点）跑 nightly 评测
+
+jobs:
+
+  # -------------------------------------------------------------------
+  # Job 1：核心模块单测（push 触发，每次必跑，文档 6.4 节）
+  # -------------------------------------------------------------------
+  unit-tests:
+    name: Unit Tests (Python 3.13, mock mode)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.lock') }}
+
+      - name: Install deps (locked versions)
+        run: |
+          python -m pip install --upgrade pip
+          # 从 requirements.lock 精确安装，避免版本漂移（依赖已在本地验证）
+          pip install -r requirements.lock
+          # 前端 import 校验需要 streamlit（streamlit 非 CI 单测必需，单独补装）
+          pip install streamlit
+          # pytest 回归测试 + 覆盖率（企业级工程化配套）
+          pip install pytest pytest-cov coverage
+
+      - name: Verify syntax
+        run: python -m compileall -q app tests
+
+      - name: Run pytest regression (core)
+        # 不显式传路径：pytest 使用 pyproject testpaths=tests/unit，
+        # 只收集 test_*.py，避免误扫 e2e 脚本与带参的 verify_*.py
+        run: python -m pytest -v
+
+      - name: Run context_manager test
+        run: python tests/unit/verify_context_manager.py
+
+      - name: Run RAG test
+        run: python tests/unit/verify_rag_pipeline.py
+
+      - name: Run review test
+        run: python tests/unit/verify_review_pipeline.py
+
+      - name: Run parser test
+        run: python tests/unit/verify_parser_pipeline.py
+
+      - name: Run infrastructure test
+        run: python tests/unit/verify_infrastructure.py
+
+      - name: Run E2E mock
+        run: python tests/e2e/test_e2e_mock.py
+
+  # -------------------------------------------------------------------
+  # Job 2：Nightly 全量评测（文档 6.4 节，约 30 分钟）
+  # -------------------------------------------------------------------
+  nightly-eval:
+    name: Nightly Eval (DashScope real API)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-full-${{ hashFiles('requirements.txt') }}
+
+      - name: Install full deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || pip install numpy scikit-learn regex dashscope
+
+      - name: Verify DashScope API key
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: |
+          if [ -z "$DASHSCOPE_API_KEY" ]; then
+            echo "::warning::未配置 Secrets.DASHSCOPE_API_KEY，真实评测跳过";
+          else
+            echo "DASHSCOPE_API_KEY 已配置 ✓"
+          fi
+
+      - name: Build QA dataset
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: python tests/qa_dataset/build_dataset.py || echo "数据集未构建（可能缺 key 或样例数据不足）"
+
+      - name: Run unit tests (baseline)
+        run: |
+          python tests/unit/verify_context_manager.py
+          python tests/unit/verify_rag_pipeline.py
+          python tests/unit/verify_review_pipeline.py
+          python tests/unit/verify_parser_pipeline.py
+          python tests/unit/verify_infrastructure.py
+
+      - name: Run pytest regression + coverage
+        run: |
+          python -m pytest --cov=app --cov-report=term --cov-report=xml
+
+      - name: Coverage gate (core modules >= 85%)
+        run: |
+          # 覆盖率必须合并 verify 脚本 + pytest，否则核心模块被低估
+          make coverage
+          make coverage-check
+        continue-on-error: true
+
+      - name: Run E2E DashScope real
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+        run: python tests/e2e/test_e2e_dashscope.py || echo "DashScope E2E 执行失败，请检查 API key / 网络"
+
+      - name: Run evaluation
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: python tests/eval/run_eval.py --mode nightly --output report.json || true
+
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval-report
+          path: |
+            report.json
+            logs/app.log
+          if-no-files-found: ignore

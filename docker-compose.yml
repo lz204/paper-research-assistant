@@ -1,0 +1,122 @@
+# =====================================================================
+# 多语种文献翻译与论文研读助手 — docker-compose.yml
+# 文档第 80 行："docker-compose.yml 只起 PostgreSQL（含 pgvector）+ Redis + App 三个容器"
+# 文档：不上 K8s。总内存占用 < 2GB（纯 CPU）。
+#
+# 四个服务：
+#   - db     : PostgreSQL + pgvector（文档 6.1 节成本看板写入 PG / 文档 4.2 节向量索引）
+#   - redis  : Redis（文档 4.2 节 KV 长时记忆池 / Celery 任务队列 broker）
+#   - app    : FastAPI 后端（项目根目录 Dockerfile）
+#   - frontend: Streamlit 前端（复用同一镜像，CMD 切换为 streamlit run）
+#
+# 使用：
+#   cp .env.example .env   # 填入 DASHSCOPE_API_KEY
+#   docker compose up -d   # 或 make up
+# =====================================================================
+
+services:
+
+  # ---------------------------------------------------------------------
+  # PostgreSQL + pgvector（文档 4.2 节向量索引 + 文档 6.1 节成本看板）
+  # ---------------------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: pra-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paper_assistant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pg_pw_2024
+    volumes:
+      - pra_pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d paper_assistant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------
+  # Redis（文档 4.2 节 KV 长时记忆池 + Celery broker）
+  # ---------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: pra-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 256m
+
+  # ---------------------------------------------------------------------
+  # FastAPI 后端
+  # ---------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pra-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 容器内部互联：服务名作为 hostname
+      DATABASE_URL: postgresql://postgres:pg_pw_2024@db:5432/paper_assistant
+      REDIS_URL: redis://redis:6379/0
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      APP_ENV: production
+      # --- DashScope API Key（从 .env 透传，或 docker compose run -e 设置）---
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      APP_LOG_FILE: logs/app.log
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    mem_limit: 1024m
+    command: >
+      sh -c "python -m uvicorn app.api.routes:create_app --factory
+      --host 0.0.0.0 --port 8000"
+
+  # ---------------------------------------------------------------------
+  # Streamlit 前端（文档 10 章：Streamlit 够用就好，不写 React）
+  # 复用 app 镜像，只改启动命令
+  # ---------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pra-frontend
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      # Streamlit 前端通过容器名访问后端 API
+      API_BASE_URL: http://app:8000
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      APP_ENV: production
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "8501:8501"
+    mem_limit: 768m
+    command: >
+      sh -c "streamlit run app/frontend/streamlit_app.py
+      --server.port 8501 --server.headless true
+      --server.address 0.0.0.0"
+
+volumes:
+  pra_pgdata:
+    driver: local

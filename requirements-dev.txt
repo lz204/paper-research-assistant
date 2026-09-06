@@ -1,0 +1,24 @@
+# =====================================================================
+# 开发/工程化依赖（企业级配套：测试、覆盖率、lint、类型检查、pre-commit）
+# 安装：pip install -r requirements-dev.txt
+# 说明：
+#   - 可复现运行环境：pip install -r requirements.lock（精确版本）
+#   - pytest 收集 tests/unit 下 test_*.py（见 pyproject.toml）；
+#     tests/unit/verify_*.py 为独立可跑脚本（python tests/unit/verify_*.py），
+#     不纳入 pytest 收集（部分函数带 doc_chunks 等参数会误判为 fixture）。
+# =====================================================================
+
+# ---- 运行时依赖（宽约束声明；精确版本见 requirements.lock）----
+-r requirements.txt
+
+# ---- 测试与覆盖率（文档 6.4 节）----
+pytest>=8.0
+pytest-cov>=5.0
+coverage>=7.5
+
+# ---- 静态检查（企业级配套）----
+ruff>=0.6
+mypy>=1.10
+
+# ---- 提交前钩子 ----
+pre-commit>=3.8

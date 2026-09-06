@@ -1,0 +1,32 @@
+# =====================================================================
+# pre-commit 钩子配置（企业级工程化配套）
+# 安装：pip install pre-commit && pre-commit install
+# 说明：需要先安装 requirements-dev.txt 中的 ruff / mypy / pytest
+# =====================================================================
+repos:
+  # ruff：快速 lint + import 排序（替代 flake8 + isort）
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # 类型检查（mock 外部依赖通过 ignore_missing_imports 放行）
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        args: [app]
+        pass_filenames: false
+
+  # 通用钩子
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]

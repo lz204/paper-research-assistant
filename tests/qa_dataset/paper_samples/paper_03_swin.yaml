@@ -1,0 +1,43 @@
+# Sample Paper 3: Swin Transformer — Hierarchical Vision Transformer using Shifted Windows
+
+paper_id: sample_paper_3
+title: "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"
+year: 2021
+authors: "Liu et al."
+url: "https://arxiv.org/abs/2103.14030"
+keywords: ["Swin Transformer", "Shifted Window", "Vision Transformer", "Image Recognition"]
+
+chunks:
+  - chunk_id: "sample_paper_3#0.0"
+    section: "Abstract"
+    text: |
+      This paper presents a new vision Transformer, called Swin Transformer, that
+      constructs hierarchical feature maps and has linear computational complexity
+      with respect to image size. Swin Transformer achieves 86.4% top-1 accuracy on
+      ImageNet-1K classification, 53.9 box AP and 46.9 mask AP on COCO object
+      detection and instance segmentation, respectively.
+  - chunk_id: "sample_paper_3#0.1"
+    section: "Introduction"
+    text: |
+      The standard Vision Transformer (ViT) operates on a fixed-size grid of patches,
+      leading to O(n^2) complexity with n patches. For high-resolution tasks
+      (detection, segmentation), this is prohibitive. Swin Transformer addresses
+      this via a shifted window partitioning scheme, where self-attention is computed
+      locally within non-overlapping windows, and information flows between adjacent
+      windows via the shifted configuration in alternating layers.
+  - chunk_id: "sample_paper_3#1.0"
+    section: "Architecture"
+    text: |
+      Architecture stages: Stage 1 (patch size 4×4) produces H/4 × W/4 × C features,
+      followed by patch merging in stages 2/3/4 halving spatial resolution and
+      doubling channels. Attention is computed within local windows of size M×M
+      (default M=7). The shifted window design in even-indexed Transformer blocks
+      partitions the feature map differently (2D shift by floor(M/2, M/2)),
+      enabling cross-window connections without excessive cost.
+  - chunk_id: "sample_paper_3#2.0"
+    section: "Experiments"
+    text: |
+      Model sizes: Swin-Tiny (28M), Swin-Small (50M), Swin-Base (88M), Swin-Large (197M).
+      ImageNet-1K top-1: Swin-T 81.3%, Swin-S 83.2%, Swin-B 86.4%.
+      COCO object detection box AP: Swin-Tiny + Mask-RCNN 46.0.
+      ADE20K semantic segmentation mIoU: Swin-Small 49.3.

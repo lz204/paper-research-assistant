@@ -1,0 +1,49 @@
+# Python 运行产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 覆盖率产物（文档 6.4 节）
+.coverage
+.coverage-core.json
+htmlcov/
+coverage.xml
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 环境变量与密钥（禁止提交真实 Key）
+.env
+.env.local
+
+# 数据与运行产物
+paper_research.db
+vector_store/
+logs/
+exports/
+out/
+*.docx
+*.pdf
+report.json
+report_*.json
+cache/
+.gradio/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Langfuse / DashScope 本地缓存
+*.sqlite
+*.sqlite3
