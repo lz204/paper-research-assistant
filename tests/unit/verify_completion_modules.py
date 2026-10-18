@@ -10,11 +10,14 @@
   7. MockStructurer：chunks → 9 角色标注 + 核心提炼
   8. LLMStructurer（DashScope 可用时）：真实验证 JSON 输出 → 结构标注+要点抽取
 
-运行：python tests/unit/verify_completion_modules.py
+运行：
+    python tests/unit/verify_completion_modules.py            # 有 Key 时自动切真实模式
+    python tests/unit/verify_completion_modules.py --mock     # 强制 mock，不产生 API 费用（CI 用）
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -50,12 +53,27 @@ def check(name, cond, detail: str = ""):
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="补齐三模块验证（翻译 / GB/T 7714 / 论文框架拆解）",
+    )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="强制 mock 模式（清空 DASHSCOPE_API_KEY，不产生 API 费用；CI 使用）",
+    )
+    args = parser.parse_args(argv)
+    if args.mock:
+        # 必须在首次 import app.* 之前清空：app/__init__._load_dotenv 用
+        # setdefault/override=False，已存在的空值会阻止 .env 注入真实 Key
+        os.environ["DASHSCOPE_API_KEY"] = ""
+
     t0 = time.time()
     global PASS, FAIL
     print("=" * 70)
     print("补齐三模块验证（翻译 / GB/T 7714 / 论文框架拆解）")
     print(f"项目根: {PROJECT_ROOT}")
+    print(f"模式: {'mock（--mock，无 API 调用）' if args.mock else 'auto（有 Key 切真实）'}")
     print("=" * 70)
 
     # 1. 术语词库

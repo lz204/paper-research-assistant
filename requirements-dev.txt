@@ -1,3 +1,5 @@
+﻿# 编码：UTF-8 with BOM —— Windows 下 pip 按 locale(GBK) 读取 requirements 文件时，
+# 无 BOM 的中文注释会触发 UnicodeDecodeError；请保留文件 BOM 以兼容 Windows。
 # =====================================================================
 # 开发/工程化依赖（企业级配套：测试、覆盖率、lint、类型检查、pre-commit）
 # 安装：pip install -r requirements-dev.txt

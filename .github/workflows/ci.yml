@@ -44,9 +44,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # 从 requirements.lock 精确安装，避免版本漂移（依赖已在本地验证）
+          # 注意：lock 已含 streamlit==1.50.0（与 fastapi 0.110 / starlette 0.36 兼容），
+          # 不要再单独 pip install streamlit（会拉到 1.51+ 并升级 starlette 导致测试崩溃）
           pip install -r requirements.lock
-          # 前端 import 校验需要 streamlit（streamlit 非 CI 单测必需，单独补装）
-          pip install streamlit
           # pytest 回归测试 + 覆盖率（企业级工程化配套）
           pip install pytest pytest-cov coverage
 
@@ -72,6 +72,18 @@ jobs:
 
       - name: Run infrastructure test
         run: python tests/unit/verify_infrastructure.py
+
+      - name: Run completion modules test (mock)
+        # 翻译 / GB-T 7714 / 论文结构拆解；--mock 不产生 DashScope API 费用
+        run: python tests/unit/verify_completion_modules.py --mock
+
+      - name: Run Agent pipeline test (mock)
+        # 工具注册 / ReAct / LangGraph 编排 / 边界恢复；离线 mock
+        run: python tests/unit/verify_agent_pipeline.py
+
+      - name: Run Agent evaluation (mock)
+        # 任务成功率 / 工具选择准确率 / 平均步数 / 成本；离线 mock
+        run: python tests/eval/run_agent_eval.py --mode mock --output report_agent.json
 
       - name: Run E2E mock
         run: python tests/e2e/test_e2e_mock.py
@@ -102,7 +114,8 @@ jobs:
       - name: Install full deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt || pip install numpy scikit-learn regex dashscope
+          # 与 unit-tests 一致从 lock 安装，避免解析出与 fastapi 0.110 冲突的 starlette
+          pip install -r requirements.lock || pip install numpy scikit-learn regex dashscope
 
       - name: Verify DashScope API key
         env:
@@ -126,6 +139,7 @@ jobs:
           python tests/unit/verify_review_pipeline.py
           python tests/unit/verify_parser_pipeline.py
           python tests/unit/verify_infrastructure.py
+          python tests/unit/verify_completion_modules.py --mock
 
       - name: Run pytest regression + coverage
         run: |

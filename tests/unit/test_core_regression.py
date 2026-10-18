@@ -426,3 +426,23 @@ def test_entity_extractor_disambiguation_and_metric_forms() -> None:
     assert "mAP=0.81" in metrics
     assert "F1=0.92" in metrics
     assert "BLEU=28.4" in metrics
+
+
+# ---------------------------------------------------------------------------
+# 6. 评测数值解析（P1 回归：quick 模式曾因 "18..." 抛 ValueError 中断）
+# ---------------------------------------------------------------------------
+
+def test_eval_find_floats_handles_ellipsis_and_versions() -> None:
+    """回归：run_eval 数值抽取不能把省略号/多小数点当 float
+
+    旧正则 ``[\\-]?\\d[\\d\\.]*`` 会把 "18..." 整段命中，
+    ``float("18...")`` 抛 ValueError 导致 `python tests/eval/run_eval.py
+    --mode quick` 在第 3/10 题中断，report.json 无法生成。
+    """
+    from tests.eval.run_eval import _find_floats, _number_fuzzy_match
+
+    assert _find_floats("BLEU 28.4, top-5 85.6%, 18...") == [28.4, 5.0, 85.6, 18.0]
+    assert _find_floats("d_model = 512, 8 heads, 0.1") == [512.0, 8.0, 0.1]
+    assert _find_floats("no numbers here") == []
+    assert _find_floats("3.13 与 -0.5") == [3.13, -0.5]
+    assert _number_fuzzy_match("BLEU 28.4 (18...)", "28.4 BLEU", None) == 1.0

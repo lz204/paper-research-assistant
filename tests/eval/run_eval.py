@@ -117,13 +117,28 @@ def _rouge_l_lcs(a: str, b: str) -> float:
 # =====================================================================
 
 
+def _find_floats(t: str) -> List[float]:
+    """从文本中抽取所有数值（float）
+
+    正则要求小数点后必须还有数字：旧实现 ``[\\-]?\\d[\\d\\.]*`` 会把
+    "18..." 这类省略号文本整段命中，随后 ``float("18...")`` 抛
+    ValueError 导致 quick 评测中断（P1 修复）。这里用
+    ``(?<![\\w.])-?\\d+(?:\\.\\d+)?``：负号只在独立位置生效（"top-5" 抽 5，
+    "-0.5" 抽 -0.5），避免把连字符误判为负号，并对异常做兜底。
+    """
+    floats: List[float] = []
+    for x in re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", t):
+        try:
+            floats.append(float(x))
+        except ValueError:  # pragma: no cover - 正则已保证合法，防御性兜底
+            continue
+    return floats
+
+
 def _number_fuzzy_match(pred_text: str, gold_answer: str, tolerance_relative: Optional[float]) -> float:
     """数值型答案：抽取所有 float，按相对容忍度计算匹配率"""
     if tolerance_relative is None:
         tolerance_relative = 0.1
-
-    def _find_floats(t: str) -> List[float]:
-        return [float(x) for x in re.findall(r"[\-]?\d[\d\.]*", t) if re.fullmatch(r"[\-]?\d[\d\.]*", x)]
 
     pred_floats = _find_floats(pred_text)
     gold_floats = _find_floats(gold_answer)

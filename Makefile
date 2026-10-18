@@ -8,10 +8,10 @@
 # - 所有命令在项目根目录执行
 # =====================================================================
 
-.PHONY: help env init up down restart api frontend test test-unit \
-        verify-infra verify-rag verify-review verify-parser verify-context \
+.PHONY: help env init up up-full down restart api frontend test test-unit \
+        verify-infra verify-rag verify-review verify-parser verify-context verify-completion verify-agent \
         test-pytest coverage coverage-check lint lint-ruff typecheck \
-        e2e e2e-mock e2e-dashscope eval dataset clean-deps logs \
+        e2e e2e-mock e2e-dashscope eval agent-eval mcp-smoke dataset clean-deps logs \
         install-deps install-dev lint
 
 # ---- 默认目标 ----
@@ -19,7 +19,8 @@ help:
 	@echo "可用目标："
 	@echo "  env              复制 .env.example → .env（首次运行）"
 	@echo "  init             初始化（安装依赖 + 生成 .env + 建 PG 容器 db）"
-	@echo "  up               docker-compose 启动（PG + Redis + App）"
+	@echo "  up               docker-compose 启动（默认 app + frontend 两服务）"
+	@echo "  up-full          docker-compose 启动全部（加 --profile full：PG + Redis）"
 	@echo "  down             docker-compose 停止"
 	@echo "  restart          重启应用容器"
 	@echo "  api              本地启动 FastAPI 后端（Windows: python -m uvicorn...）"
@@ -31,12 +32,16 @@ help:
 	@echo "  verify-review    运行综述单测"
 	@echo "  verify-parser    运行 parser 单测"
 	@echo "  verify-infra     运行基础设施单测"
+	@echo "  verify-completion 运行补齐模块验证（翻译/GB-T/结构拆解，mock 不计费）"
+	@echo "  verify-agent     运行 Agent 链路验证（工具注册/ReAct/LangGraph/边界）"
 	@echo ""
 	@echo "  e2e              运行全部 E2E（mock + DashScope 真实）"
 	@echo "  e2e-mock         只跑 mock 模式 E2E（必通过，无 API key 也能跑）"
 	@echo "  e2e-dashscope    只跑 DashScope 真实调用 E2E（无 key 会提示并跳过）"
 	@echo ""
 	@echo "  eval             自动化评测全集（文档 6.4 节，约 30 分钟）"
+	@echo "  agent-eval       Agent 评测（任务成功率/工具选择准确率/步数/成本，mock）"
+	@echo "  mcp-smoke        MCP server 协议冒烟（需先 make api 启动后端）"
 	@echo "  dataset          构建/扩展 QA 数据集（内置样例集，可抓取更多 arXiv）"
 	@echo ""
 	@echo "  install-deps     pip install -r requirements.txt"
@@ -61,9 +66,13 @@ init: env install-deps
 	@echo "  2. 运行 make up 启动 docker-compose"
 	@echo "  3. 运行 make e2e-mock 验证 mock 模式全链路"
 
-# ---- docker-compose 三容器（文档 10 章）----
+# ---- docker-compose（默认 app + frontend；--profile full 额外启动 PG + Redis）----
 up:
 	docker compose up -d
+
+# 完整版：额外启动 PG(pgvector) + Redis（当前代码为接口预留/内存版，默认不需要）
+up-full:
+	docker compose --profile full up -d
 
 down:
 	docker compose down
@@ -83,7 +92,7 @@ frontend:
 
 # ---- 单测（文档 6.4 节 push 触发）----
 # 按粒度拆分，便于 CI 按失败模块 rerun
-test: verify-context verify-rag verify-review verify-parser verify-infra
+test: verify-context verify-rag verify-review verify-parser verify-infra verify-completion verify-agent
 	@echo "全部单测通过 ✓"
 
 # pytest 回归测试（需 pip install -r requirements-dev.txt）
@@ -123,6 +132,23 @@ verify-parser:
 
 verify-infra:
 	python tests/unit/verify_infrastructure.py
+
+# 补齐模块验证（翻译 / GB/T 7714 / 论文结构拆解）
+# --mock：强制 mock，不产生 DashScope API 费用（CI 与日常回归使用）
+verify-completion:
+	python tests/unit/verify_completion_modules.py --mock
+
+# Agent 链路验证（工具注册 / ReAct / LangGraph / 边界恢复，全 mock 不产生费用）
+verify-agent:
+	python tests/unit/verify_agent_pipeline.py
+
+# Agent 评测（任务成功率 / 工具选择准确率 / 平均步数 / 成本；mock 模式可离线跑）
+agent-eval:
+	python tests/eval/run_agent_eval.py --mode mock --output report_agent.json
+
+# MCP server 协议冒烟（tools/call 需要先 make api 启动后端）
+mcp-smoke:
+	python scripts/agent_mcp_smoke.py
 
 # ---- E2E 端到端（文档第 3 章架构图验证）----
 e2e: e2e-mock e2e-dashscope

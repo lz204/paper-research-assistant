@@ -1,13 +1,17 @@
 # =====================================================================
 # 多语种文献翻译与论文研读助手 — docker-compose.yml
-# 文档第 80 行："docker-compose.yml 只起 PostgreSQL（含 pgvector）+ Redis + App 三个容器"
-# 文档：不上 K8s。总内存占用 < 2GB（纯 CPU）。
+# 设计：不上 K8s，单机部署；总内存占用 < 2GB（纯 CPU）。
 #
-# 四个服务：
-#   - db     : PostgreSQL + pgvector（文档 6.1 节成本看板写入 PG / 文档 4.2 节向量索引）
-#   - redis  : Redis（文档 4.2 节 KV 长时记忆池 / Celery 任务队列 broker）
-#   - app    : FastAPI 后端（项目根目录 Dockerfile）
+# 默认启动（docker compose up -d / make up）：
+#   - app     : FastAPI 后端（项目根目录 Dockerfile）
 #   - frontend: Streamlit 前端（复用同一镜像，CMD 切换为 streamlit run）
+#
+# 可选服务（--profile full 时启动，接口预留、当前代码默认内存版）：
+#   - db     : PostgreSQL + pgvector（向量索引 / 成本看板落库，接口已预留）
+#   - redis  : Redis（长时记忆池 / 缓存，接口已预留）
+#   注：默认不启动它们，因为当前实现为进程内内存版，避免"起了容器但没接线"。
+#   后续落地 pgvector/PgCostTracker 时使用：
+#     docker compose --profile full up -d
 #
 # 使用：
 #   cp .env.example .env   # 填入 DASHSCOPE_API_KEY
@@ -18,10 +22,12 @@ services:
 
   # ---------------------------------------------------------------------
   # PostgreSQL + pgvector（文档 4.2 节向量索引 + 文档 6.1 节成本看板）
+  # 当前为接口预留：PgvectorRetriever / PgCostTracker 尚未实现，默认不启动
   # ---------------------------------------------------------------------
   db:
     image: pgvector/pgvector:pg16
     container_name: pra-db
+    profiles: ["full"]
     restart: unless-stopped
     environment:
       POSTGRES_DB: paper_assistant
@@ -40,10 +46,12 @@ services:
 
   # ---------------------------------------------------------------------
   # Redis（文档 4.2 节 KV 长时记忆池 + Celery broker）
+  # 当前为接口预留：默认不启动（见文件头说明）
   # ---------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: pra-redis
+    profiles: ["full"]
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -63,13 +71,10 @@ services:
       dockerfile: Dockerfile
     container_name: pra-app
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    # 不依赖 db/redis：默认部署下二者未启动，且当前实现为进程内内存版；
+    # 需要 pgvector/Redis 时用 --profile full 启动并在代码中接线。
     environment:
-      # 容器内部互联：服务名作为 hostname
+      # 容器内部互联：服务名作为 hostname（--profile full 时使用）
       DATABASE_URL: postgresql://postgres:pg_pw_2024@db:5432/paper_assistant
       REDIS_URL: redis://redis:6379/0
       APP_HOST: 0.0.0.0

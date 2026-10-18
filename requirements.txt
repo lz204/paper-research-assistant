@@ -1,3 +1,5 @@
+﻿# 编码：UTF-8 with BOM —— Windows 下 pip 按 locale(GBK) 读取 requirements 文件时，
+# 无 BOM 的中文注释会触发 UnicodeDecodeError；请保留文件 BOM 以兼容 Windows。
 # =====================================================================
 # 多语种文献翻译与论文研读助手 — Python 依赖
 # 文档 6.3 节：所有可选依赖 try import + ImportError 降级
@@ -76,13 +78,23 @@ httpx>=0.27,<0.28
 # =====================================================================
 # 前端（文档第 2/10 章：Streamlit 够用就好，不写 React）
 # =====================================================================
-streamlit>=1.37
+# 上限 <1.51：streamlit 1.51+ 起依赖 starlette>=0.46，会与 requirements.lock 中
+# 锁定的 fastapi==0.110.0 / starlette==0.36.3 冲突（pip 升级 starlette 后
+# FastAPI TestClient 直接 TypeError）。升级 streamlit 前需整体升级 fastapi/starlette。
+streamlit>=1.37,<1.51
 # Streamlit 自定义组件（可选，增强展示）
 # streamlit-aggrid>=0.3
 # streamlit-echarts>=0.4
 # 图表（成本看板每日趋势）
 plotly>=5.22
-pandas>=2.2
+# 上限 <3：streamlit 1.50.0 依赖 pandas<3，装 pandas 3.x 会与前端依赖冲突
+pandas>=2.2,<3
+
+# =====================================================================
+# Agent 编排（文档：Agent 核心；未装时自动回退手写 ReAct 循环）
+# =====================================================================
+langgraph>=1.0
+langchain-core>=1.0
 
 # =====================================================================
 # 自动化评测（文档 6.4 节，可选，未装降级纯规则计算）
