@@ -347,6 +347,7 @@ make coverage && make coverage-check
 | `verify_completion_modules.py --mock` | 通过（28 项检查） |
 | `verify_agent_pipeline.py` | 通过（66/66 断言：工具注册 / ReAct / LangGraph / 边界恢复） |
 | `run_agent_eval.py --mode mock` | 通过：6/6 任务，task success 100%，tool selection 100%，avg_steps 2.17，成本 ¥0 |
+| `run_agent_eval.py --mode real`（真实 qwen-plus） | 通过：6/6 任务，task success 100%，tool selection 100%，avg_steps 2.67，avg_latency 7.9s，**¥0.0156/任务**（真实 LLM 工具调用 + 假工具后端，见验证报告 §11.3/§11.5） |
 | `agent_mcp_smoke.py` | 通过：initialize（protocolVersion 2024-11-05）/ tools/list 4 工具；`--call` 需先启动后端 |
 | `tests/e2e/test_e2e_mock.py` | 通过（全链路 mock，约 2 秒） |
 | `scripts/verify_pain_points.py` | 三大痛点全部闭环 |
@@ -380,6 +381,8 @@ python tests/eval/run_agent_eval.py --mode real --limit 2   # 可选：Agent 真
 ```
 
 > Agent 真实评测（`--mode real`）会产生真实 DashScope 费用，默认不跑；mock 模式（`--mode mock`）可离线验证编排与指标结构。
+>
+> **真实评测实测结果**（2026-10-19，qwen-plus + Function Calling，6 任务）：task success 100%、tool selection 100%、avg_steps 2.67、avg_latency 7.9s、¥0.0156/任务。该轮评测同时暴露并修复了 3 个 mock 无法发现的问题（tool 消息缺 `tool_call_id`、缺少收敛机制、评测判据过严），修复前后对比见 [VERIFICATION_REPORT.md](VERIFICATION_REPORT.md) §11.5。
 
 > 已实测（见 [VERIFICATION_REPORT.md](VERIFICATION_REPORT.md) §5）：`sample_papers/` 中 28 篇真实 arXiv 论文批量解析 28/28 成功（917 页 / 7726 chunks）；Attention、DeepSeek-V3 等论文的真实 Embedding + Qwen-Plus 问答链路可用，单问成本约 0.003–0.004 元。
 

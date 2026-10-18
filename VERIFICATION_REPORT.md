@@ -309,12 +309,34 @@ make api  # 终端 1；make frontend 终端 2
 | 前端 6 Tab 冒烟 | Streamlit `AppTest` 执行 `main()`（本地/API 双模式） | **PASS**：6 Tab 顺序正确、无 exception；本地模式 22/22、API + 真实 mock 后端 22/22（工具轨迹 list_documents/search_chunks、citations、引用 expander、历史 2 轮） |
 | 覆盖率门控 | `.\scripts\dev.ps1 coverage` | **PASS**：context_manager 95.0% / fusion_engine 94.9% / citation_verifier 86.8%（均 ≥85%）；新增 `app/agent`：tools 80%、runner 87%、langgraph_runner 91% |
 | 依赖可复现安装 | `pip install -r requirements.lock --dry-run` | **exit 0**（lock 含 streamlit 1.50.0 / plotly 7.1.0 / langgraph 1.2.9 / langchain-core 1.5.5，与 fastapi 0.110 / starlette 0.36 兼容） |
-| Agent E2E（真实模型，一次性冒烟） | `POST /agent`（真实 key，Attention 论文 15 页 / 107 chunks） | **PASS**：framework=langgraph、model=qwen-plus、3 步（list_documents → search_chunks → answer），答案正确（WMT 2014 英德 ~450 万句对 / BLEU 28.4），tokens 4040/341，**成本 ¥0.0203**，耗时 15.8s |
+| Agent 评测（真实 qwen-plus + Function Calling） | `python tests/eval/run_agent_eval.py --mode real --output report_agent_real.json` | **6/6 任务 PASS**：task_success_rate=100%，tool_selection_accuracy=100%，avg_steps=2.67，avg_latency=7.9s，avg_cost=¥0.0156/任务，error_rate=0%；framework=langgraph（真实 LLM 工具调用 + 假工具后端） |
+| Agent E2E（真实模型 + 真实论文） | `POST /agent`（真实 key，Attention 论文 15 页 / 107 chunks） | **PASS**：framework=langgraph、model=qwen-plus、3 步（list_documents → search_chunks → answer），答案正确（WMT 2014 英德 ~450 万句对 / BLEU 28.4），tokens 4040/341，**成本 ¥0.0203**，耗时 15.8s |
+
+### 11.5 真实评测驱动修复的 3 个问题（2026-10-19）
+
+`--mode real` 首轮暴露了 mock 无法发现的问题，修复后复测指标明显改善：
+
+| # | 问题 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | 模型反复调用同一工具、耗尽 max_steps，答案来自「兜底摘要」 | runner 追加的 `role="tool"` 消息**缺少 `tool_call_id`**，DashScope 无法把工具观察关联到上一条 `assistant.tool_calls` | `ToolExecution` 增加 `call_id`；执行后回填，tool 消息携带 `tool_call_id`（simple 与 LangGraph 共用同一逻辑） |
+| 2 | 即使能用工具结果，模型仍倾向多轮检索、不主动收敛 | 系统 prompt 未约束检索预算，且达到上限后没有"强制作答"机制 | ① prompt 增加"1-2 次工具结果后尽快收敛"；② 第 2 步工具调用后注入一次「请立即给出最终答案」系统提醒；③ 预算耗尽时强制一次**无工具 LLM 调用**，把已有观察总结成最终答案（失败才回退兜底摘要） |
+| 3 | 评测误判：`translate`/`no_docs` 答案正确却判失败；工具选择准确率偏低 | 判据把"假工具返回标记"当硬断言；工具选择用集合完全一致比较，额外合理的 `list_documents` 被算错 | 判据改为语义关键词（兼容真实模型意译）；工具选择改为 `expected ⊆ actual` |
+
+**修复前后对比**（同一 6 任务、同一真实 qwen-plus）：
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| Task success rate | 66.7% | **100%** |
+| Tool selection accuracy | 50.0% | **100%** |
+| Avg steps | 4.17 | **2.67** |
+| Avg latency / 任务 | 12.6s | **7.9s** |
+| Avg cost / 任务 | ¥0.0239 | **¥0.0156** |
 
 ### 11.4 口径说明（防误用）
 
-- Agent 评测 **mock 模式**的 task_success_rate / tool_selection_accuracy 是**脚本化 LLM 的编排回归指标**，不代表真实模型能力；真实指标需 `run_agent_eval.py --mode real`（需 key + 费用），且工具仍为假回调，只评测 Agent 工具选择与编排质量。
+- Agent 评测 **mock 模式**的 task_success_rate / tool_selection_accuracy 是**脚本化 LLM 的编排回归指标**，不代表真实模型能力；`--mode real` 使用真实 qwen-plus + Function Calling，但工具仍是**假回调**（固定 2 篇论文/2 个 chunk），因此真实指标反映的是"Agent 工具选择与编排质量"，不是端到端文档问答准确率。
 - MCP 为手写最小协议实现（initialize / tools/list / tools/call），不等同于官方 mcp 包与完整 MCP 生态；`tools/call` 依赖后端已启动并持有文档索引。
-- Agent 真实 LLM 自主工具调用已做**一次性冒烟验证**（见 §11.3 最后一行：qwen-plus + Function Calling + LangGraph 3 步、答案正确、¥0.0203）；该链路未纳入 CI（成本原因），日常回归使用 mock。
-- 本轮真实验证总支出约 **¥0.07**（Agent E2E ¥0.0203 + 两次开发期误触发的真实调用 ¥0.0333/¥0.017），已在后续测试中统一强制 mock。
+- 真实模式不纳入 CI（成本原因），日常回归使用 mock；真实命令可手动执行（`--mode real`，需 key）。
+- Docker Compose 容器级验证：当前执行环境 `docker` CLI 不可用（未在 PATH / 注册表 / 进程中找到 Docker Desktop），因此本轮**未实际构建/启动容器**；Dockerfile 已改为优先按 `requirements.lock` 安装依赖，降低容器内解析冲突风险。可在用户本机执行 `docker compose config && docker compose up -d` 复验。
+- 本轮真实 API 支出约 **¥0.66**（4 次真实评测迭代 ≈¥0.57、真实论文 E2E ¥0.0203、两次开发期误触发 ≈¥0.05），后续测试统一强制 mock。
 - 历史实验数字（40%→5%、Rouge-L 0.81、QA 81% 等）与本节 mock 指标**不可比较**，口径见项目文档 §0.2 与 README「数据口径与可复现性声明」。
