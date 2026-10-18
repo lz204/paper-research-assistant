@@ -35,8 +35,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 # ---- 复制项目代码 ----
 COPY app/      app/
 COPY tests/    tests/
-COPY logs/     logs/
 COPY Makefile  Makefile
+# logs 目录在 git 中被忽略，不能直接 COPY（fresh clone 下不存在）；
+# 这里创建目录，docker-compose 会挂载 ./logs 覆盖
+RUN mkdir -p logs
 
 # ---- 环境变量默认值（生产环境在 docker-compose 或 .env 中覆盖）----
 ENV APP_ENV=production

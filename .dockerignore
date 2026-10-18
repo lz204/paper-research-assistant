@@ -1,0 +1,37 @@
+# Docker 构建上下文忽略项（避免把 .venv / 样例 PDF / 运行产物打进镜像）
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+.git/
+.github/
+
+# 运行产物
+logs/
+exports/
+out/
+cache/
+*.docx
+report.json
+report_*.json
+.coverage
+.coverage-core.json
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 大体积 / 版权数据（演示时由脚本按需下载或运行时挂载）
+sample_papers/
+*.pdf
+
+# 本地环境与密钥（容器通过 compose environment 注入）
+.env
+.env.local
