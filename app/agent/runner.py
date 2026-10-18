@@ -43,7 +43,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "2. 可用工具：list_documents（列出已解析文档）、search_chunks（检索论文片段）、"
     "translate_text（翻译）、generate_review（生成综述）。\n"
     "3. 最终答案使用中文；引用论文片段时在结论后附 [chunk_id] 引用。\n"
-    "4. 最多 {max_steps} 步工具调用；信息已足够时直接给出最终答案，不要再调用工具。"
+    "4. 最多 {max_steps} 步工具调用；信息已足够时直接给出最终答案，不要再调用工具。\n"
+    "5. 不要重复调用「同一工具 + 同一参数」；拿到 1-2 次工具结果后应尽快收敛，"
+    "不要为了「更全面」反复检索；信息足够或工具报错时直接基于已有信息回答。"
 )
 
 # 匹配答案中的 [chunk_id] / [doc_id, chunk_id] 引用标记
@@ -271,9 +273,11 @@ class AgentRunner:
         citations: Dict[str, Dict[str, Any]] = {}
         answer = ""
         error = ""
-        last_executions: List[ToolExecution] = []
+        executions_seen: List[ToolExecution] = []
         exhausted = False
-
+        nudged = False
+        # 完成 2 步工具调用后注入一次收敛提醒，避免真实模型把工具预算耗在反复检索上
+        nudge_at = 2
         for step_index in range(1, self.max_steps + 1):
             t0 = time.time()
             response = self._call_llm(messages)
@@ -298,17 +302,34 @@ class AgentRunner:
                 step_index, response.tool_calls, doc_id
             )
             step.tool_calls = executions
-            last_executions = executions
+            executions_seen.extend(executions)
             flat.extend(new_flat)
             citations.update(new_citations)
             messages.append(self._assistant_tool_call_message(response))
             self._append_tool_messages(messages, executions)
+            if not nudged and step_index >= nudge_at and step_index < self.max_steps:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "（系统提醒）已获得足够的工具结果，请立即基于现有信息给出最终答案，"
+                            "不要再调用工具。"
+                        ),
+                    }
+                )
+                nudged = True
         else:
-            # for 循环自然结束（达到 max_steps 仍有工具调用）：兜底答案
+            # for 循环自然结束（达到 max_steps 仍有工具调用）：强制收敛作答
             exhausted = True
 
         if exhausted:
-            answer = self._max_steps_answer(last_executions)
+            answer, final_response = self._force_final_answer(question, executions_seen)
+            if final_response is not None and steps:
+                # 最后一次无工具收敛调用的 token/成本归并到最后一个步骤，
+                # 保持 steps 数不超过 max_steps（契约层不感知额外调用）
+                steps[-1].input_tokens += int(final_response.input_tokens or 0)
+                steps[-1].output_tokens += int(final_response.output_tokens or 0)
+                steps[-1].cost_yuan += float(final_response.cost_yuan or 0.0)
 
         return self._finalize(
             trace_id=trace_id,
@@ -361,6 +382,70 @@ class AgentRunner:
                 error=f"LLM 调用异常: {type(exc).__name__}: {exc}",
             )
 
+    def _call_llm_no_tools(self, messages: List[Dict[str, Any]]) -> ToolCallingResponse:
+        """无工具 LLM 调用（工具预算耗尽后的强制收敛作答）。"""
+        try:
+            return self.llm.chat_with_tools(
+                messages,
+                [],
+                temperature=0.2,
+                max_tokens=1024,
+            )
+        except Exception as exc:  # noqa: BLE001 - 收敛调用异常降级为 error
+            logger.exception("LLM 收敛调用异常")
+            return ToolCallingResponse(
+                model=self.model,
+                error=f"LLM 调用异常: {type(exc).__name__}: {exc}",
+            )
+
+    def _force_final_answer(
+        self,
+        question: str,
+        executions: List[ToolExecution],
+    ) -> tuple:
+        """工具预算耗尽后强制一次无工具 LLM 调用，基于已收集信息收敛作答。
+
+        真实模型常见行为：达到步数上限时仍在发起工具调用，若直接返回
+        「已达到最大步数 + 最后一条工具结果」用户体验较差。这里用一次
+        **不带 tools** 的 LLM 调用把已有观察总结成最终答案；失败时回退
+        ``_max_steps_answer``（保持既有契约与测试兼容）。
+
+        Returns:
+            (answer, ToolCallingResponse | None)：response 用于把本次
+            token/成本归并到结果统计；无执行记录时为 None。
+        """
+        if not executions:
+            return self._max_steps_answer(executions), None
+        lines: List[str] = []
+        for execution in executions[-4:]:
+            if execution.ok:
+                lines.append(f"- {execution.name}: {_preview_result(execution.result)[:500]}")
+            else:
+                lines.append(f"- {execution.name}: 调用失败（{execution.error}）")
+        summary = "\n".join(lines)[:3000]
+        messages: List[Dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": (
+                    self.system_prompt
+                    + "\n你已经用完工具调用次数，现在必须基于已有工具结果直接给出最终答案，"
+                    "禁止调用工具。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"问题：{question}\n\n已收集的工具结果：\n{summary}\n\n"
+                    "请用中文给出最终答案；引用论文片段时附 [chunk_id]。"
+                ),
+            },
+        ]
+        response = self._call_llm_no_tools(messages)
+        content = str(response.content or "").strip()
+        if content and not response.error:
+            return "（已达到最大步数，已基于已收集信息收敛作答）" + content, response
+        return self._max_steps_answer(executions), response
+
     def _execute_tool_calls(
         self,
         step_index: int,
@@ -389,6 +474,9 @@ class AgentRunner:
                 # doc_id 作为默认文档过滤（LLM 未显式指定时）
                 arguments["doc_id"] = doc_id
             execution = self.tools.call(name, arguments)
+            # 记录 tool_call_id：后续 role=tool 消息必须携带，否则 DashScope 无法
+            # 把工具观察关联到发起调用的 assistant.tool_calls，真实模型会重复调用
+            execution.call_id = str(getattr(call, "call_id", "") or "")
             executions.append(execution)
             flat.append(_make_flat_entry(step_index, execution))
         _collect_search_citations(executions, citations)
@@ -425,19 +513,25 @@ class AgentRunner:
         messages: List[Dict[str, Any]],
         executions: List[ToolExecution],
     ) -> None:
-        """把工具结果以 role=tool 消息追加到 messages（content 截断到 3000 字符）"""
+        """把工具结果以 role=tool 消息追加到 messages（content 截断到 3000 字符）
+
+        OpenAI / DashScope tools 协议要求 tool 消息携带 ``tool_call_id``，
+        与上一条 assistant.tool_calls 的 id 一一对应；缺失会导致真实模型
+        无法读取工具结果（表现为反复调用同一工具直到 max_steps）。
+        """
         for execution in executions:
             try:
                 content = json.dumps(execution.result, ensure_ascii=False)
             except (TypeError, ValueError):
                 content = "{}"
-            messages.append(
-                {
-                    "role": "tool",
-                    "name": execution.name,
-                    "content": content[:3000],
-                }
-            )
+            tool_message: Dict[str, Any] = {
+                "role": "tool",
+                "content": content[:3000],
+            }
+            if execution.call_id:
+                tool_message["tool_call_id"] = execution.call_id
+            tool_message["name"] = execution.name
+            messages.append(tool_message)
 
     def _max_steps_answer(self, executions: List[ToolExecution]) -> str:
         """超过最大步数时的兜底答案：提示 + 最后一次工具结果摘要"""

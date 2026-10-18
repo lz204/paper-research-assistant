@@ -41,7 +41,10 @@ class AgentState(TypedDict, total=False):
     step_no: int
     pending: List[Any]  # 本轮待执行的 ToolCallRequest 列表
     last_executions: List[ToolExecution]
+    executions: List[ToolExecution]  # 全量工具执行记录（收敛作答用）
+    question: str
     doc_id: str
+    nudged: bool  # 是否已注入过"请立即收敛作答"提醒
 
 
 def _build_graph(runner: AgentRunner) -> Any:
@@ -105,6 +108,21 @@ def _build_graph(runner: AgentRunner) -> Any:
         flat = list(state.get("tool_calls", [])) + new_flat
         citations = dict(state.get("citations", {}))
         citations.update(new_citations)
+        all_executions = list(state.get("executions", [])) + executions
+        nudged = bool(state.get("nudged", False))
+        step_no = int(state.get("step_no", 0))
+        nudge_at = 2  # 完成 2 步工具调用后注入一次收敛提醒
+        if not nudged and step_no >= nudge_at and step_no < runner.max_steps:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "（系统提醒）已获得足够的工具结果，请立即基于现有信息给出最终答案，"
+                        "不要再调用工具。"
+                    ),
+                }
+            )
+            nudged = True
         return {
             "messages": messages,
             "steps": steps,
@@ -112,15 +130,26 @@ def _build_graph(runner: AgentRunner) -> Any:
             "citations": citations,
             "pending": [],
             "last_executions": executions,
+            "executions": all_executions,
+            "nudged": nudged,
         }
 
     def finish_node(state: AgentState) -> Dict[str, Any]:
-        """达到最大步数节点：用已收集信息兜底最终答案"""
+        """达到最大步数节点：强制无工具收敛作答（失败回退兜底摘要）"""
+        steps = list(state.get("steps", []))
+        answer, final_response = runner._force_final_answer(
+            str(state.get("question", "") or ""),
+            list(state.get("executions", [])),
+        )
+        if final_response is not None and steps:
+            # 收敛调用的 token/成本归并到最后一个步骤（保持 steps 数不变）
+            steps[-1].input_tokens += int(final_response.input_tokens or 0)
+            steps[-1].output_tokens += int(final_response.output_tokens or 0)
+            steps[-1].cost_yuan += float(final_response.cost_yuan or 0.0)
         return {
-            "final_answer": runner._max_steps_answer(
-                list(state.get("last_executions", []))
-            ),
+            "final_answer": answer,
             "pending": [],
+            "steps": steps,
         }
 
     def route_after_agent(state: AgentState) -> str:
@@ -189,6 +218,8 @@ def run_agent_langgraph(
         "step_no": 0,
         "pending": [],
         "last_executions": [],
+        "executions": [],
+        "question": question,
         "doc_id": str(doc_id or ""),
     }
     config = {"recursion_limit": max(25, 2 * runner.max_steps + 10)}

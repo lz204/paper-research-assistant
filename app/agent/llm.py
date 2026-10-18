@@ -162,10 +162,16 @@ def _message_text(message: Any) -> str:
 
 
 def _last_user_message(messages: List[Dict[str, Any]]) -> str:
-    """取最后一条 user 消息文本（没有则返回空串）"""
+    """取最后一条 user 消息文本（跳过 runner 注入的「系统提醒」收敛提示）"""
     for message in reversed(messages or []):
-        if _get_field(message, "role", "") == "user":
-            return _message_text(message)
+        if _get_field(message, "role", "") != "user":
+            continue
+        text = _message_text(message)
+        # runner 在工具预算过半后会注入一条 user 角色的收敛提醒；
+        # 它不是用户真实问题，mock 策略必须忽略，否则会把提醒误当问题
+        if text.lstrip().startswith("（系统提醒）"):
+            continue
+        return text
     return ""
 
 

@@ -22,9 +22,15 @@ RUN apt-get update \
 WORKDIR /app
 
 # ---- 先装依赖层（利用 Docker 缓存）----
-COPY requirements.txt .
+# 优先用 requirements.lock 精确安装（避免容器内解析出与 FastAPI 锁定的
+# starlette 版本冲突，例如 streamlit 1.51+ / fastapi 新版）；无 lock 时回退 txt
+COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && if [ -f requirements.lock ]; then \
+         pip install --no-cache-dir -r requirements.lock; \
+       else \
+         pip install --no-cache-dir -r requirements.txt; \
+       fi
 
 # ---- 复制项目代码 ----
 COPY app/      app/

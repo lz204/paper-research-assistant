@@ -79,6 +79,9 @@ class ToolExecution:
     result: Dict[str, Any] = field(default_factory=dict)
     error: str = ""
     latency_ms: int = 0
+    # 对应的 LLM tool_call id（追加 role=tool 消息时必须回填，否则模型无法
+    # 把工具结果关联到本次调用，会重复调用同一工具；不进 to_dict 契约）
+    call_id: str = ""
 
     @property
     def ok(self) -> bool:
