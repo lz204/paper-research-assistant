@@ -12,7 +12,7 @@
 | --- | --- |
 | 文档第 1 章三大痛点 | 全部闭环（痛点 1/2/3 均通过场景验证） |
 | 全量测试（单测 + E2E mock） | 全部通过 |
-| pytest 回归测试 | 16 passed |
+| pytest 回归测试 | 16 passed（2026-09-07）；P1 修复后 28 passed（§10）；**Agent 化改造后 74 passed（§11）** |
 | 核心模块覆盖率 | context_manager 95% / fusion_engine 94.9% / citation_verifier 86.8% |
 | 真实论文 PDF → 问答演示 | 通过（Attention Is All You Need，15 页，107 chunks） |
 | 用户上传论文集批量验证 | 通过（28 篇 / 917 页 / 7726 chunks，含长文中间检索） |
@@ -61,7 +61,7 @@
 | 测试 | 命令 | 结果 |
 | --- | --- | --- |
 | 语法编译 | `python -m compileall -q app tests scripts` | 0 错误 |
-| pytest 回归 | `pytest`（pyproject testpaths=tests/unit） | 16 passed |
+| pytest 回归 | `pytest`（pyproject testpaths=tests/unit） | 16 passed（2026-09-07 时点；后续见 §10 / §11） |
 | ContextManager 集成验证 | `python tests/unit/verify_context_manager.py` | exit 0 |
 | RAG 全链路验证 | `python tests/unit/verify_rag_pipeline.py` | exit 0 |
 | 综述全链路验证 | `python tests/unit/verify_review_pipeline.py` | exit 0 |
@@ -160,10 +160,11 @@
 达标：分层清晰、外部依赖全可降级、可观测/成本治理/容错链完整、CI 真实覆盖、覆盖率有门控、单测与回归闭环。
 
 诚实边界（需外部设施，非代码缺陷）：
-1. 真实 VLM（Qwen-VL）按页公式/版面识别依赖真实 key 与网络，仅文本层全链路验证；
-2. PgvectorRetriever / PgCostTracker / Redis 为接口预留或内存版，落地需数据库服务；
-3. Streamlit 前端直连 DashScope（不调用 FastAPI），属设计决定而非缺陷；
-4. 评测集内置 3 篇样例，扩展至更大规模需 `make dataset` + DashScope。
+1. 真实 VLM（Qwen-VL）按页公式/版面识别依赖真实 key 与网络，仅文本层全链路验证；`/upload` 的 `use_vlm=true` 为可选链路（mock 可演示），默认走文本层；
+2. PgvectorRetriever / PgCostTracker / Redis 为接口预留或内存版，落地需数据库服务；docker-compose 默认只启动 app + frontend，PG/Redis 在 `--profile full` 下可选；
+3. 前端默认为 API 模式（`ApiClient` 调 FastAPI）；「本地进程模式」是离线兜底（进程内直连 DashScope），属设计决定而非缺陷；
+4. 评测集内置 3 篇样例，扩展至更大规模需 `make dataset` + DashScope；
+5. Agent 在 mock 模式下可完整演示工具调用轨迹，真实 LLM 自主工具调用需 key 与少量 API 费用；MCP 为手写最小协议实现（initialize / tools/list / tools/call）。
 
 ---
 
@@ -171,9 +172,14 @@
 
 ```bash
 # 全量测试
-make test                # verify 脚本套件
+make test                # verify 脚本套件（含 verify-completion / verify-agent）
 make test-pytest         # pytest 回归（需 dev 依赖）
 make coverage && make coverage-check
+
+# Agent（mock，无需 key）
+make verify-agent        # Agent 链路验证（工具 / ReAct / LangGraph / 边界）
+make agent-eval          # Agent 评测（任务成功率 / 工具选择 / 步数 / 成本）
+make mcp-smoke           # MCP stdio 协议冒烟（tools/call 需先 make api）
 
 # E2E
 make e2e-mock
@@ -184,7 +190,131 @@ python scripts/demo_real_paper.py           # 真实论文 PDF → 问答（需 
 python scripts/demo_uploaded_papers.py --paper <关键词>  # 任意上传论文 RAG 问答
 # 例：python scripts/demo_uploaded_papers.py --paper deepseek --limit 1
 
+# Windows（无 make 时）
+.\scripts\dev.ps1 test
+.\scripts\dev.ps1 test-pytest
+.\scripts\dev.ps1 verify-agent
+.\scripts\dev.ps1 agent-eval
+.\scripts\dev.ps1 mcp-smoke
+.\scripts\dev.ps1 api        # 终端 1
+.\scripts\dev.ps1 frontend   # 终端 2
+
 # 依赖
-pip install -r requirements.lock         # 可复现安装
+pip install -r requirements.lock         # 可复现安装（含 streamlit / langgraph / langchain-core）
 pip install -r requirements-dev.txt      # 开发工具
 ```
+
+---
+
+## 10. P1 修复与复验（2026-10-19）
+
+本轮修复 5 项 P1 问题（可复现性 / 可演示性 / 架构自洽），全部实测通过。
+
+### 10.1 修复清单
+
+| # | 问题 | 修复 | 涉及文件 |
+| --- | --- | --- | --- |
+| 1 | `make eval` 默认 quick 模式必崩：数值正则把 `18...` 当 float，`ValueError` 中断评测 | 抽出模块级 `_find_floats`，改用 `(?<![\w.])-?\d+(?:\.\d+)?` 正则 + 异常兜底；新增 pytest 回归用例 | `tests/eval/run_eval.py`、`tests/unit/test_core_regression.py` |
+| 2 | 仓库缺 `README.md`（文档附录却列出） | 补写中文 README（功能/架构/快速开始/API/测试/目录/设计取舍/已知局限） | `README.md` |
+| 3 | 「多语种文献翻译」模块（`app/translation`）无 HTTP 接口、前端无入口、CI 不跑 | 新增 `POST /translate`；前端新增「🌐 文献翻译」Tab（API/本地两种模式）；`verify_completion_modules.py` 增加 `--mock` 开关并纳入 Makefile/CI | `app/api/routes.py`、`app/frontend/streamlit_app.py`、`app/frontend/api_client.py`、`tests/unit/verify_completion_modules.py`、`Makefile`、`.github/workflows/ci.yml` |
+| 4 | 前端全部逻辑在进程内直调，未使用 FastAPI，与 API-first 表述冲突 | 新增 `ApiClient`（httpx，全异常降级）；前端默认 API 模式（健康检查自动识别、不可达回退本地进程模式），6 个业务页全部支持两条路径 | `app/frontend/api_client.py`、`app/frontend/streamlit_app.py`；后端补 `/documents`、`/cost/summary`、上传/问答/综述响应字段 |
+| 5 | 本机演示路径不通：无 streamlit、无 make，且直接装 streamlit 会升级 starlette 破坏 fastapi 锁定 | 新增 `scripts/dev.ps1`（Windows 原生，替代 make）；`requirements.lock` 锁入 `streamlit==1.50.0` / `plotly==7.1.0`（1.51+ 依赖 starlette>=0.46 与 fastapi 0.110 冲突）；`requirements.txt` 加 `<1.51` 上限 | `scripts/dev.ps1`、`requirements.lock`、`requirements.txt` |
+
+> 兼容性决策：业务端点「已索引文档列表」使用 `GET /documents`，把 `GET /docs` 留给 FastAPI 自带 Swagger UI（避免业务端点遮蔽框架接口文档页）。
+
+### 10.2 新增/扩展 API（mock 模式实测）
+
+| 端点 | 实测结果 |
+| --- | --- |
+| `POST /translate` | `Self-attention is the core of Transformer.` → 译文非空、`aligned_terms=["Transformer 架构","自注意力机制"]` |
+| `POST /upload` | mock 模式返回 1 页 / 5 chunks + chunk 预览；真实模式返回 title + 分块预览 |
+| `POST /ask` | 返回 `model/input_tokens/output_tokens/cost_yuan/mock_mode/memory_used`；`history` 注入最近 3 轮 |
+| `POST /review` | `export_docx=true` 时内存渲染，返回 `docx_b64`（约 51KB）/`docx_mode=docx`/`docx_name`/`docx_size` |
+| `GET /documents` | 上传后列出 `{doc_id,title,num_chunks}` |
+| `GET /cost/summary` | `total_cost/daily/by_model/by_user/by_paper/cache` 结构完整 |
+| `GET /health` | `components` 含 `translation` |
+
+### 10.3 复验结果（本机 Windows / Python 3.13）
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| pytest 回归 | `[.venv\Scripts\python.exe] -m pytest -q` | **28 passed**（新增 12：翻译/索引/成本 API 11 + eval 数值解析 1） |
+| 模块 verify 套件 | `.\scripts\dev.ps1 test` | 5 个 verify + E2E mock + `verify_completion_modules --mock` 全部通过（exit 0） |
+| 补齐模块验证（mock） | `python tests/unit/verify_completion_modules.py --mock` | 28/28 检查通过，约 0.8s，无 API 费用 |
+| 评测 quick | `python tests/eval/run_eval.py --mode quick` | 通过（此前 `ValueError: '18...'` 中断已修复），输出 `report_quick.json` |
+| 覆盖率门控 | `.\scripts\dev.ps1 coverage` | context_manager 95.0% / fusion_engine 94.9% / citation_verifier 86.8%，通过 |
+| HTTP 全链路（mock） | uvicorn + httpx | `/health` `/docs`(Swagger) `/upload` `/documents` `/ask` `/review` `/translate` `/cost/summary` 全部 200 且字段符合契约 |
+| 前端真实 UI 冒烟 | Streamlit `AppTest` 执行 `main()` | 5 个 Tab（P1 时点；Agent 轮后为 6 个，见 §11）、API 模式默认识别、翻译交互返回译文与术语、后端不可达自动回退本地模式且无异常 |
+
+### 10.4 复现命令
+
+```powershell
+# Windows（无需 make）
+.\scripts\dev.ps1 install
+.\scripts\dev.ps1 test
+.\scripts\dev.ps1 test-pytest
+.\scripts\dev.ps1 coverage
+.\scripts\dev.ps1 eval
+.\scripts\dev.ps1 verify-completion
+.\scripts\dev.ps1 api        # 终端 1
+.\scripts\dev.ps1 frontend   # 终端 2
+
+# Linux / macOS
+make test && make test-pytest && make eval
+make coverage && make coverage-check
+make api  # 终端 1；make frontend 终端 2
+```
+
+---
+
+## 11. Agent 化改造与 P0 修复验证（2026-10-19）
+
+> **状态**：Agent 化改造已完成并通过 Lead 最终复验（2026-10-19），本节数字均为实际运行结果；mock 指标口径见 11.4。
+>
+> 口径说明：本节标题沿用任务口径，「P0 修复」指本轮改造中一并收口的部署与契约问题（compose 默认启动未接线服务、`/upload` 缺少 VLM 入口、Agent 依赖未锁定等），逐项见 11.1。
+
+### 11.1 改造清单
+
+| # | 模块 | 改造内容 | 涉及文件 |
+| --- | --- | --- | --- |
+| 1 | **Agent 核心** | 新建 `app/agent/`：`types.py`（AgentResult / AgentStep / ToolExecution 冻结契约 v1）、`tools.py`（4 工具注册表 + OpenAI tools schema）、`llm.py`（DashScope Function Calling + ScriptedMockLLM）、`runner.py`（simple ReAct 循环 + `create_agent_runner` 工厂）、`langgraph_runner.py`（LangGraph StateGraph 编排，异常自动回退 simple） | `app/agent/*`、`tests/unit/test_agent_regression.py`、`tests/unit/verify_agent_pipeline.py`、`tests/eval/run_agent_eval.py` |
+| 2 | **API** | 新增 `POST /agent`、`GET /agent/tools`、`POST /agent/tools/call`；`/health` 的 `components` 增加 `agent`；`/upload` 增加可选 `use_vlm`（最多前 10 页）并返回 `vlm_used` / `formulas` / `parse_mode` | `app/api/routes.py`、`app/api/__init__.py`、`tests/unit/test_api_agent.py` |
+| 3 | **前端** | 新增第 6 个 Tab「🤖 Agent 助手」（顺序：PDF 上传 / 文献翻译 / Agent 助手 / 论文问答 / 综述 / 成本看板）；`ApiClient` 增加 `agent()` / `agent_tools()`；API 模式展示工具调用轨迹，本地进程模式用 in-process `AgentRunner` 同款体验 | `app/frontend/api_client.py`、`app/frontend/streamlit_app.py` |
+| 4 | **MCP** | 手写 stdio JSON-RPC（MCP 2024-11-05）server：`initialize` / `tools/list` / `tools/call`，`tools/call` 转发到后端 `POST /agent/tools/call`；配套协议冒烟脚本（避免安装官方 mcp 包升级 starlette） | `scripts/agent_mcp_server.py`、`scripts/agent_mcp_smoke.py`、`tests/unit/test_agent_mcp.py` |
+| 5 | **VLM 可选解析链路** | `/upload` 的 `use_vlm=true` 走 PyMuPDF 转图 → Qwen-VL 识别 → `FusionEngine` 融合 → `FormulaBinder` 绑定；默认关闭控制成本，mock 模式可离线演示，失败回退文本层（`parse_mode=text_fallback`） | `app/api/routes.py`、`app/parser/*` |
+| 6 | **compose profile** | `docker-compose.yml` 改为默认只启动 app + frontend；db(pgvector) / redis 加 `profiles: ["full"]`（当前接口预留，PgvectorRetriever / PgCostTracker 未实现）；`Makefile` 增加 `up-full` | `docker-compose.yml`、`Makefile` |
+| 7 | **依赖与开发脚本** | `requirements.lock` 锁入 `streamlit==1.50.0` / `plotly==7.1.0` / `langgraph==1.2.9` / `langchain-core==1.5.5`（避免 starlette 冲突）；`dev.ps1` 增加 `verify-agent` / `agent-eval` / `mcp-smoke`；`Makefile` 增加 `verify-agent` / `agent-eval` / `mcp-smoke`；CI 增加 Agent 验证步骤 | `requirements*.txt/lock`、`scripts/dev.ps1`、`Makefile`、`.github/workflows/ci.yml` |
+
+### 11.2 新增 / 变更契约（mock 模式）
+
+| 端点 / 配置 | 契约要点 |
+| --- | --- |
+| `POST /agent` | 入参：`question`(≤2000 字)、`doc_id`、`user_id`、`max_steps`(默认 6，上限 8)、`framework`(`auto` / `simple` / `langgraph`)、`history`；响应：`answer`、`steps`、`tool_calls`、`citations`、`trace_id`、`model`、`input_tokens`、`output_tokens`、`cost_yuan`、`mock_mode`、`framework`、`latency_ms`、`error` |
+| `GET /agent/tools` | 返回 OpenAI tools 格式的 4 个工具 spec（list_documents / search_chunks / translate_text / generate_review） |
+| `POST /agent/tools/call` | 入参 `name` / `arguments`；响应 `name` / `arguments` / `result` / `error` / `latency_ms`；供 MCP 适配器与调试使用 |
+| `POST /upload`（扩展） | 新增 `use_vlm`（默认 `false`）；响应新增 `vlm_used` / `formulas` / `parse_mode`（`text` / `vlm` / `text_fallback`） |
+| `GET /health`（扩展） | `components` 增加 `agent`（mock / dashscope） |
+| `docker compose` | 默认 app + frontend 两服务；`--profile full` 才启动 PG(pgvector) + Redis（当前接口预留/内存版） |
+| `requirements.lock` | 新增 streamlit==1.50.0 / plotly==7.1.0 / langgraph==1.2.9 / langchain-core==1.5.5 |
+
+### 11.3 验证命令与结果（2026-10-19 实测）
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| pytest 回归（含 Agent/MCP 新增用例） | `python -m pytest -q`（mock 隔离） | **74 passed，0 failed，0 error**（原有 28 + Agent 回归 20 + API Agent 16 + MCP 10；含既有 API/Translate/VLM 用例） |
+| Agent 链路验证 | `python tests/unit/verify_agent_pipeline.py` | **66/66 断言通过**（工具注册与异常降级 / simple ReAct / LangGraph 真跑 / 边界恢复） |
+| Agent 评测（mock） | `python tests/eval/run_agent_eval.py --mode mock --output report_agent.json` | **6/6 任务 PASS**；task_success_rate=100%，tool_selection_accuracy=100%，avg_steps=2.17，avg_cost=¥0，error_rate=0%；framework=langgraph |
+| MCP 协议冒烟 | `python scripts/agent_mcp_smoke.py --call search_chunks`（先启动 mock 后端） | **PASS**：initialize 返回 protocolVersion=2024-11-05，tools/list 返回 4 个工具，tools/call 成功转发到后端 |
+| VLM 可选链路（mock） | `POST /upload` + `{"use_vlm": true}` | **PASS**：`vlm_used=true`、`parse_mode=vlm`、`formulas=3`（含低置信 1 条）、`num_chunks=5`；默认 `use_vlm=false` 行为不变 |
+| 前端 6 Tab 冒烟 | Streamlit `AppTest` 执行 `main()`（本地/API 双模式） | **PASS**：6 Tab 顺序正确、无 exception；本地模式 22/22、API + 真实 mock 后端 22/22（工具轨迹 list_documents/search_chunks、citations、引用 expander、历史 2 轮） |
+| 覆盖率门控 | `.\scripts\dev.ps1 coverage` | **PASS**：context_manager 95.0% / fusion_engine 94.9% / citation_verifier 86.8%（均 ≥85%）；新增 `app/agent`：tools 80%、runner 87%、langgraph_runner 91% |
+| 依赖可复现安装 | `pip install -r requirements.lock --dry-run` | **exit 0**（lock 含 streamlit 1.50.0 / plotly 7.1.0 / langgraph 1.2.9 / langchain-core 1.5.5，与 fastapi 0.110 / starlette 0.36 兼容） |
+| Agent E2E（真实模型，一次性冒烟） | `POST /agent`（真实 key，Attention 论文 15 页 / 107 chunks） | **PASS**：framework=langgraph、model=qwen-plus、3 步（list_documents → search_chunks → answer），答案正确（WMT 2014 英德 ~450 万句对 / BLEU 28.4），tokens 4040/341，**成本 ¥0.0203**，耗时 15.8s |
+
+### 11.4 口径说明（防误用）
+
+- Agent 评测 **mock 模式**的 task_success_rate / tool_selection_accuracy 是**脚本化 LLM 的编排回归指标**，不代表真实模型能力；真实指标需 `run_agent_eval.py --mode real`（需 key + 费用），且工具仍为假回调，只评测 Agent 工具选择与编排质量。
+- MCP 为手写最小协议实现（initialize / tools/list / tools/call），不等同于官方 mcp 包与完整 MCP 生态；`tools/call` 依赖后端已启动并持有文档索引。
+- Agent 真实 LLM 自主工具调用已做**一次性冒烟验证**（见 §11.3 最后一行：qwen-plus + Function Calling + LangGraph 3 步、答案正确、¥0.0203）；该链路未纳入 CI（成本原因），日常回归使用 mock。
+- 本轮真实验证总支出约 **¥0.07**（Agent E2E ¥0.0203 + 两次开发期误触发的真实调用 ¥0.0333/¥0.017），已在后续测试中统一强制 mock。
+- 历史实验数字（40%→5%、Rouge-L 0.81、QA 81% 等）与本节 mock 指标**不可比较**，口径见项目文档 §0.2 与 README「数据口径与可复现性声明」。
