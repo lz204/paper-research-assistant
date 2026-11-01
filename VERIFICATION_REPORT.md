@@ -20,7 +20,7 @@
 | 真实论文端到端（②） | 通过：Attention Is All You Need，15 页 / 107 chunks |
 | 批量真实论文（②） | 通过：28 篇 arXiv / 917 页 / 7,726 chunks，0 失败 |
 | Agent 真实评测（②，小样本） | 6/6 任务编排冒烟通过；样本小，不代表端到端文档问答质量 |
-| 未验证边界 | Docker 未实机构建、无部署、无真实用户；pgvector / PG 成本 / Redis 为接口预留 |
+| 未验证边界 | Docker 仅 CI 构建通过（`docker build`），未实机部署/未跑容器、无真实用户；pgvector / PG 成本 / Redis 为接口预留 |
 
 ## 2. 验证环境
 
@@ -155,7 +155,7 @@
 - MMR 如实口径：`MockReviewGenerator` 默认不执行 MMR（`mmr_enabled=false`、`mmr_applied=false`、`dedup_stats.calls=0`、`skipped=2`、`reduce_top_k=8`）；monkeypatch `REDUCE_TOP_K=1` 时 mock 路径可实际执行（`mmr_applied=true / calls=1 / input=2 / selected=1`），但 `mmr_enabled` 仍为 false（“能力启用”与“实际执行”分开）。真实 LLM 路径能力已接入，本次未用真实 Key 验证去重效果。
 - 真实评测不纳入 CI（成本原因），日常回归使用 mock；真实命令可手动执行（需 key，会产生少量费用）。
 - MCP 为手写最小协议实现（initialize / tools/list / tools/call），不等同官方 mcp 包与完整 MCP 生态；`tools/call` 依赖后端已启动并持有文档索引。
-- Docker Compose：当前执行环境 `docker` CLI 不可用，**未实际构建 / 启动容器**；Dockerfile 已改为优先按 `requirements.lock` 安装依赖，容器化路径需在安装 Docker 的机器上复验。
+- Docker：本机 `docker` CLI 不可用；GitHub Actions `docker-build` job 已通过 `docker build` + `docker compose config`（2026-11-01 首次推送运行），但**未实机启动容器 / 未部署**；容器化运行路径仍需在安装 Docker 的机器上复验。
 - 真实 API 支出记录（②档）：约 ¥0.66（多次评测迭代 + 真实论文 E2E + 开发期误触发），后续真实调用统一手动执行。
 - 历史实验数字与本文 ①/② 指标**不可比较**，统一见项目文档附录 B（标注 †）。
 
@@ -191,7 +191,7 @@ python tests/eval/run_agent_eval.py --mode real
 
 | 项 | 结果 |
 | --- | --- |
-| CI 覆盖真实性 | unit-tests job 从 `requirements.lock` 安装完整依赖，跑 ruff 基础正确性检查 + pytest（92 项，覆盖率门禁 55%）+ 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock；docker-build job 非阻断；nightly 跑真实评测（失败不阻断） |
+| CI 覆盖真实性 | unit-tests job 从 `requirements.lock` 安装完整依赖，跑 ruff 基础正确性检查 + pytest（92 项，覆盖率门禁 55%）+ 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock；docker-build job 已通过（`docker build` + `docker compose config`，非阻断）；nightly 跑真实评测（失败不阻断） |
 | 依赖可复现 | `requirements.lock` 直接依赖精确 pin（含 pdfplumber 0.11.9 / streamlit / plotly / langgraph / langchain-core）；CI 从 lock 安装 |
 | 测试体系 | `pyproject.toml` 只收 tests/unit/test_*.py，避免误收带参 verify 脚本；conftest mock 隔离 |
 | 覆盖率门控 | `scripts/check_coverage.py` + `make coverage-check`（核心 3 模块 ≥85%） |
@@ -205,4 +205,4 @@ python tests/eval/run_agent_eval.py --mode real
 2. PgvectorRetriever / PgCostTracker / Redis 为接口预留或内存版，落地需数据库服务；docker-compose 默认只起 app + frontend。
 3. 前端默认为 API 模式（ApiClient 调 FastAPI）；「本地进程模式」是离线兜底，属设计决定而非缺陷；无自动化 UI 测试。
 4. 评测集内置 3 篇样例，扩展至更大规模需 `make dataset` + DashScope 真实调用。
-5. Agent / MCP 为可演示的最小实现，真实工具调用需 key 与少量费用；Docker 未实机构建，无部署、无真实用户反馈。
+5. Agent / MCP 为可演示的最小实现，真实工具调用需 key 与少量费用；Docker 仅 CI 构建通过、未实机部署，无真实用户反馈。

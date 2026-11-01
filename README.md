@@ -1,4 +1,4 @@
-# 多语种文献翻译与论文研读助手
+# 多语种文献翻译与论文研读助手 [![CI](https://github.com/lz204/paper-research-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/lz204/paper-research-assistant/actions/workflows/ci.yml)
 
 > **API-first 的论文研读助手**：把 PDF 公式与正文绑在一起解决公式乱码，用手写 KV 记忆池对抗长文「中间遗忘」，用跨文献 RAG + 引用事实验证生成可溯源的综述初稿。
 >
@@ -72,7 +72,7 @@ Copy-Item .env.example .env              # 填 DASHSCOPE_API_KEY；不填自动 
 ```
 
 - `requirements.lock` 已锁 `streamlit==1.50.0` / `plotly==7.1.0` / `langgraph==1.2.9` / `langchain-core==1.5.5`；不要单独装 streamlit 1.51+（会与 `fastapi==0.110.0` / `starlette==0.36.3` 冲突）。
-- 不填 key 也能启动：LLM / VLM / Embedding 走 mock，`GET /health` 返回 `mock_mode=true`；**Docker** 已编写 `Dockerfile` / `docker-compose.yml`，但本机无 Docker、未实机构建/部署，本地运行以 `dev.ps1` / `make` 为准。
+- 不填 key 也能启动：LLM / VLM / Embedding 走 mock，`GET /health` 返回 `mock_mode=true`；**Docker** 已编写 `Dockerfile` / `docker-compose.yml`，GitHub Actions 的 `docker-build` job 已通过 `docker build` + `docker compose config`（未实机部署、未跑容器），本地运行以 `dev.ps1` / `make` 为准。
 
 ## API 端点
 
@@ -123,7 +123,7 @@ Linux / macOS：`make test`、`make test-pytest`、`make e2e-mock`、`make eval`
 
 > **Agent 真实评测口径**：qwen-plus + 固定假工具后端，6 条脚本化任务的编排冒烟（success 100% / tool selection 100% / avg 2.67 步 / ¥0.0156 每任务）；样本小，不代表端到端文档问答质量，且会产生少量 API 费用。mock 与 real 指标不可混用。
 
-**CI（GitHub Actions）**：push / pull_request 跑 unit-tests（pytest 92 项 + 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock），并接 ruff 基础正确性检查（E9/F63/F7/F82）与 pytest 覆盖率门禁（`--cov-fail-under=55`，pytest-only 口径）；另有非阻断 `docker-build` job（`docker build` + `docker compose config`，首次运行后看结果）；nightly 跑 verify + pytest --cov，核心模块门控 `continue-on-error`，真实 E2E 与评测 `|| true` 兜底并上传报告 artifact。前端无自动化 UI 测试，验证方式为人工冒烟。
+**CI（GitHub Actions）**：push / pull_request 跑 unit-tests（pytest 92 项 + 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock），并接 ruff 基础正确性检查（E9/F63/F7/F82）与 pytest 覆盖率门禁（`--cov-fail-under=55`，pytest-only 口径）；`docker-build` job 已通过（`docker build` + `docker compose config`，非阻断）；nightly 跑 verify + pytest --cov，核心模块门控 `continue-on-error`，真实 E2E 与评测 `|| true` 兜底并上传报告 artifact。前端无自动化 UI 测试，验证方式为人工冒烟。
 
 ## 目录结构
 
@@ -141,7 +141,7 @@ paper-research-assistant/
 - 复杂嵌套表格还原有限；综述偏「文献罗列」，学术判断仍需人工。
 - 强依赖云端 API；单进程内存索引（重启丢失，多 worker 不共享）、无鉴权 / 多租户；pgvector / PG 成本追踪 / Redis 为接口预留。
 - VLM 链路只处理前 10 页；默认文本层。评测集内置 3 篇样例；Agent / MCP 为最小实现。
-- Docker 未实机构建，无真实用户反馈；完整限制表见项目文档 §6。
+- Docker 仅 CI 构建通过（`docker build`），未实机部署/未跑容器，无真实用户反馈；完整限制表见项目文档 §6。
 
 ## 文档
 
