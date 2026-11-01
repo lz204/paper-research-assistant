@@ -430,16 +430,25 @@ def create_review_pipeline(
     from .generator import create_review_generator
     from .citation_verifier import CitationVerifier
 
-    planner = create_outline_planner(mode=mode, api_key=api_key)
-    generator = create_review_generator(
-        mode=mode, api_key=api_key, embedder=embedder,
-    )
+    # mock 组件的构造函数不接受 api_key（无 LLM 调用），因此 mock 模式不传；
+    # 其余模式透传 api_key 供 LLM 组件使用。此前统一透传会让 mode="mock" 直接
+    # TypeError——这也是 /review 长期只能走 auto 的原因之一。
+    if str(mode).lower() == "mock":
+        planner = create_outline_planner(mode="mock")
+        generator = create_review_generator(mode="mock", embedder=embedder)
+    else:
+        planner = create_outline_planner(mode=mode, api_key=api_key)
+        generator = create_review_generator(
+            mode=mode, api_key=api_key, embedder=embedder,
+        )
 
     citation_verifier = None
     if verify_citations and retriever is not None:
         try:
             from ..rag.reranker import create_reranker
-            reranker = create_reranker("auto", api_key=api_key)
+            # mock 模式强制规则化 NLI 判断，绝不因 .env 里的真实 key 触达 API
+            reranker_mode = "noop" if str(mode).lower() == "mock" else "auto"
+            reranker = create_reranker(reranker_mode, api_key=api_key)
         except ImportError:
             reranker = None
         citation_verifier = CitationVerifier(

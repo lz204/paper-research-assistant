@@ -15,6 +15,7 @@ dashscope==1.26.5
 # pdf2image>=1.17
 # pdfplumber>=0.11
 pymupdf==1.25.5
+pdfplumber==0.11.9
 rank-bm25==0.2.2
 # spacy 可选（未装时实体抽取降级纯正则）
 # spacy>=3.7

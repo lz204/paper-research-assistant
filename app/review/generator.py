@@ -40,6 +40,12 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+# Reduce 阶段 MMR 保留的最大要点数（控制段落长度；文档 4.3 节）
+# 模块级常量供 /review 响应 dedup_stats.reduce_top_k 直接透出，
+# 生成器类通过 _MMRReduceMixin.REDUCE_TOP_K 使用同一默认值（测试可临时调小）。
+REDUCE_TOP_K = 8
+
+
 # ---------------------------------------------------------------------------
 # 数据结构
 # ---------------------------------------------------------------------------
@@ -161,6 +167,123 @@ class BaseReviewGenerator(ABC):
 
 
 # ---------------------------------------------------------------------------
+# Reduce 阶段 MMR 去重（LLM / Mock 生成器共用）
+# ---------------------------------------------------------------------------
+
+
+class _MMRReduceMixin:
+    """Reduce 阶段 MMR 去重 + 统计（LLM 与 Mock 生成器共用）
+
+    文档 4.3 节：在 Reduce 阶段选片段时惩罚已选片段的相似度（MMR），
+    把"多篇文献观点高度相似"的重复内容压下去。
+
+    可观测性：embedder 缺失、候选项不足、mmr 导入失败、向量化失败等跳过分支
+    必须计数（skipped）并记录 debug 原因——不允许静默降级，
+    /review 会把统计透出到 dedup_stats，便于确认 MMR 是否真正执行。
+
+    Attributes:
+        REDUCE_TOP_K: Reduce 阶段保留的最大要点数（子类可覆盖，便于测试调小）
+        mmr_lambda: 相关性 vs 多样性权衡系数（文档 4.3 节调参默认 0.7）
+        mmr_stats: MMR 执行统计
+            {calls, input_summaries, selected_summaries, skipped}
+    """
+
+    # Reduce 阶段保留的最大要点数：默认值与模块级 REDUCE_TOP_K 一致；
+    # 子类 / 测试可通过类属性覆盖（如 monkeypatch 成 1 以验证 MMR 真正执行）
+    REDUCE_TOP_K = 8
+    mmr_lambda: float = 0.7
+
+    @staticmethod
+    def _new_mmr_stats() -> Dict[str, int]:
+        """新建 MMR 统计字典（每个生成器实例独立，避免跨请求串号）"""
+        return {
+            "calls": 0,
+            "input_summaries": 0,
+            "selected_summaries": 0,
+            "skipped": 0,
+        }
+
+    def _skip_mmr(
+        self,
+        reason: str,
+        summaries: List[MapSummary],
+    ) -> List[MapSummary]:
+        """跳过 MMR 并计数（logger.debug 记录原因，不允许静默降级）"""
+        self.mmr_stats["skipped"] += 1
+        logger.debug(
+            "MMR 跳过（%s）: input=%d, REDUCE_TOP_K=%d",
+            reason, len(summaries), self.REDUCE_TOP_K,
+        )
+        return summaries
+
+    def _reduce_with_mmr(
+        self,
+        summaries: List[MapSummary],
+        topic: str,
+        section,
+    ) -> List[MapSummary]:
+        """Reduce 阶段：MMR 去重（复用 app.rag.mmr）
+
+        Args:
+            summaries: Map 阶段各文献要点
+            topic: 综述主题（仅用于日志）
+            section: 章节对象（需有 title / description，作为 MMR 的 query 文本）
+        Returns:
+            去重后的要点列表（跳过 MMR 时原样返回全部 summaries）
+        """
+        # 每次调用都统计输入规模（无论最终是否跳过），保证 dedup_stats 可观测
+        self.mmr_stats["input_summaries"] += len(summaries)
+
+        if self.embedder is None:
+            return self._skip_mmr("embedder 未配置", summaries)
+        if len(summaries) <= self.REDUCE_TOP_K:
+            return self._skip_mmr(
+                f"summaries({len(summaries)}) <= REDUCE_TOP_K({self.REDUCE_TOP_K})",
+                summaries,
+            )
+        try:
+            from ..rag.mmr import MMRItem, MMRSelector
+        except ImportError:
+            return self._skip_mmr("无法导入 app.rag.mmr", summaries)
+
+        # 向量化每个 summary（失败项跳过，不阻塞主流程）
+        texts = [s.text for s in summaries]
+        try:
+            vecs, _failed = self.embedder.embed(texts)
+        except Exception as e:  # noqa: BLE001
+            return self._skip_mmr(f"summary 向量化异常: {e}", summaries)
+
+        items: List = []
+        for s, vec in zip(summaries, vecs):
+            if vec is None:
+                continue
+            items.append(MMRItem(id=s.doc_id, vec=vec, payload=s))
+        if not items:
+            return self._skip_mmr("无可用 summary 向量", summaries)
+
+        # 用章节标题 + 描述作为 MMR 的 query 向量
+        query_text = f"{section.title} {section.description}"
+        try:
+            query_vec = self.embedder.embed_one(query_text)
+        except Exception as e:  # noqa: BLE001
+            return self._skip_mmr(f"query 向量化异常: {e}", summaries)
+        if query_vec is None:
+            return self._skip_mmr("query 向量化失败", summaries)
+
+        selector = MMRSelector(lambda_=self.mmr_lambda)
+        selected_items = selector.select_batch(items, query_vec, k=self.REDUCE_TOP_K)
+
+        # 成功选出：calls + selected_summaries 计数
+        self.mmr_stats["calls"] += 1
+        self.mmr_stats["selected_summaries"] += len(selected_items)
+        logger.debug(
+            "MMR 去重完成: topic=%s, input=%d, selected=%d, lambda=%.2f",
+            (topic or "")[:30], len(summaries), len(selected_items), self.mmr_lambda,
+        )
+        return [it.payload for it in selected_items]
+
+
+# ---------------------------------------------------------------------------
 # 段落级缓存（文档 6.2 节）
 # ---------------------------------------------------------------------------
 
@@ -257,7 +380,7 @@ REDUCE_PROMPT_TEMPLATE = """\
 """
 
 
-class LLMReviewGenerator(BaseReviewGenerator):
+class LLMReviewGenerator(_MMRReduceMixin, BaseReviewGenerator):
     """LLM 综述生成器（文档 4.3 节 Map-Reduce）
 
     工作流程：
@@ -283,8 +406,6 @@ class LLMReviewGenerator(BaseReviewGenerator):
     """
 
     MAX_RETRY = 2
-    # Reduce 阶段 MMR 保留的最大要点数（控制段落长度）
-    REDUCE_TOP_K = 8
 
     def __init__(
         self,
@@ -301,6 +422,8 @@ class LLMReviewGenerator(BaseReviewGenerator):
         self.mmr_lambda = mmr_lambda
         self.cache = cache or ParagraphCache()
         self.max_retry = max_retry
+        # MMR 执行统计（/review 的 dedup_stats 数据源，跳过也要计数）
+        self.mmr_stats = self._new_mmr_stats()
         self._client = None
         self._mock_mode = not bool(self.api_key)
         if self._mock_mode:
@@ -332,10 +455,13 @@ class LLMReviewGenerator(BaseReviewGenerator):
         sections: List,
         doc_chunks: Dict[str, List],
     ) -> GenerationResult:
-        # mock 模式或 API 不可用 → 降级
+        # mock 模式或 API 不可用 → 降级（保留 embedder，让 Reduce 阶段 MMR 仍可执行）
         if self._mock_mode or not self._ensure_client():
             logger.info("LLMReviewGenerator 不可用，降级为 MockReviewGenerator")
-            return MockReviewGenerator().generate(topic, sections, doc_chunks)
+            fallback = MockReviewGenerator(
+                embedder=self.embedder, mmr_lambda=self.mmr_lambda,
+            )
+            return fallback.generate(topic, sections, doc_chunks)
 
         paragraphs: List[Paragraph] = []
         failed_sections: List[str] = []
@@ -465,50 +591,6 @@ class LLMReviewGenerator(BaseReviewGenerator):
             raise _LLMInterruptedError(f"Map 阶段 LLM 失败: doc_id={doc_id}")
 
         return self._parse_map_response(doc_id, section.section_id, response)
-
-    def _reduce_with_mmr(
-        self,
-        summaries: List[MapSummary],
-        topic: str,
-        section,
-    ) -> List[MapSummary]:
-        """Reduce 阶段：MMR 去重（复用 app.rag.mmr）
-
-        文档 4.3 节：在 Reduce 阶段选片段时惩罚已选片段相似度
-        无 embedder 时跳过 MMR，直接返回全部 summaries
-        """
-        if self.embedder is None or len(summaries) <= self.REDUCE_TOP_K:
-            logger.debug("无 embedder 或 summaries 数量少，跳过 MMR")
-            return summaries
-
-        try:
-            from ..rag.mmr import MMRItem, MMRSelector
-        except ImportError:
-            logger.warning("无法导入 app.rag.mmr，跳过 MMR 去重")
-            return summaries
-
-        # 向量化每个 summary
-        texts = [s.text for s in summaries]
-        vecs, failed = self.embedder.embed(texts)
-
-        items: List = []
-        for s, vec in zip(summaries, vecs):
-            if vec is None:
-                continue
-            items.append(MMRItem(id=s.doc_id, vec=vec, payload=s))
-
-        if not items:
-            return summaries
-
-        # 用章节标题 + 描述作为 query 向量
-        query_text = f"{section.title} {section.description}"
-        query_vec = self.embedder.embed_one(query_text)
-        if query_vec is None:
-            return summaries
-
-        selector = MMRSelector(lambda_=self.mmr_lambda)
-        selected_items = selector.select_batch(items, query_vec, k=self.REDUCE_TOP_K)
-        return [it.payload for it in selected_items]
 
     def _reduce_llm(
         self,
@@ -659,17 +741,38 @@ class LLMReviewGenerator(BaseReviewGenerator):
 # ---------------------------------------------------------------------------
 
 
-class MockReviewGenerator(BaseReviewGenerator):
+class MockReviewGenerator(_MMRReduceMixin, BaseReviewGenerator):
     """Mock 综述生成器（无 API key 时降级）
 
-    不调 LLM，直接从 chunks 拼接模板化段落，每段含 [doc_id, chunk_id] 引用，
-    保证 citation_verifier 链路可联调。
+    不调 LLM，直接按"Map（每篇文献取要点）→ Reduce（MMR 去重 + 模板拼接）"
+    生成段落，每段含 [doc_id, chunk_id] 引用，保证 citation_verifier 链路可联调。
+
+    Reduce 阶段复用 _MMRReduceMixin：注入 embedder 时真正执行 MMR 去重
+    （Mock 下通常是 FakeEmbedder），未注入时跳过并计数到 mmr_stats，
+    保证 /review 的 dedup_stats 在 mock 模式下依然可观测、不静默。
 
     段落级缓存同样生效（验证缓存机制）。
+
+    Args:
+        cache: 段落级缓存（None 时新建内存缓存）
+        embedder: 向量化器（用于 MMR；None 时跳过 MMR）
+        mmr_lambda: MMR 多样性权衡系数（文档默认 0.7）
+        api_key: 仅为兼容 create_review_generator 的参数透传（Mock 不调用任何 LLM）
     """
 
-    def __init__(self, cache: Optional[ParagraphCache] = None):
+    def __init__(
+        self,
+        cache: Optional[ParagraphCache] = None,
+        embedder=None,
+        mmr_lambda: float = 0.7,
+        api_key: Optional[str] = None,
+    ):
         self.cache = cache or ParagraphCache()
+        self.embedder = embedder
+        self.mmr_lambda = mmr_lambda
+        self.api_key = api_key or ""
+        # MMR 执行统计（/review 的 dedup_stats 数据源，跳过也要计数）
+        self.mmr_stats = self._new_mmr_stats()
 
     def generate(
         self,
@@ -695,7 +798,7 @@ class MockReviewGenerator(BaseReviewGenerator):
                 continue
             cache_misses += 1
 
-            # 模板化生成：从每篇文献取第一个 chunk 作为引用
+            # Map（每篇文献取第一个 chunk 的要点）→ Reduce（MMR + 模板拼接）
             paragraph = self._mock_section(topic, section, related_doc_ids, doc_chunks)
             self.cache.put(topic, section_id, related_doc_ids, paragraph)
             paragraphs.append(paragraph)
@@ -710,14 +813,49 @@ class MockReviewGenerator(BaseReviewGenerator):
             cache_misses=cache_misses,
         )
 
-    @staticmethod
     def _mock_section(
+        self,
         topic: str,
         section,
         related_doc_ids: List[str],
         doc_chunks: Dict[str, List],
     ) -> Paragraph:
-        """模板化生成单章节段落"""
+        """单章节模板化生成：Map 要点 → MMR 去重 → Reduce 拼接段落"""
+        map_summaries = self._mock_map(section, related_doc_ids, doc_chunks)
+        selected = self._reduce_with_mmr(map_summaries, topic, section)
+        return self._mock_reduce(topic, section, selected)
+
+    @staticmethod
+    def _mock_map(
+        section,
+        related_doc_ids: List[str],
+        doc_chunks: Dict[str, List],
+    ) -> List[MapSummary]:
+        """Map 阶段：每篇文献取第一个 chunk 作为要点（带引用）"""
+        summaries: List[MapSummary] = []
+        for doc_id in related_doc_ids:
+            chunks = doc_chunks.get(doc_id, [])
+            if not chunks:
+                continue
+            chunk = chunks[0]
+            text = (chunk.text or "").strip()
+            # text 用于 MMR 向量化（保留更多上下文），key_points 保留 40 字摘要
+            summaries.append(MapSummary(
+                doc_id=doc_id,
+                section_id=section.section_id,
+                key_points=[text.replace("\n", " ")[:40]],
+                citations=[Citation(doc_id=doc_id, chunk_id=chunk.chunk_id)],
+                text=text[:500],
+            ))
+        return summaries
+
+    @staticmethod
+    def _mock_reduce(
+        topic: str,
+        section,
+        selected: List[MapSummary],
+    ) -> Paragraph:
+        """Reduce 阶段：把（MMR 选出的）要点拼成模板段落，保留引用标记"""
         citations: List[Citation] = []
         sentences: List[str] = []
 
@@ -727,26 +865,21 @@ class MockReviewGenerator(BaseReviewGenerator):
             f"{section.description}。"
         )
 
-        # 每篇文献一句话 + 引用
-        for doc_id in related_doc_ids:
-            chunks = doc_chunks.get(doc_id, [])
-            if not chunks:
-                continue
-            chunk = chunks[0]
-            citations.append(Citation(doc_id=doc_id, chunk_id=chunk.chunk_id))
-            # 取 chunk 前 40 字作为要点摘要
-            preview = chunk.text.replace("\n", " ").strip()[:40]
-            sentences.append(
-                f"文献 [{doc_id}, {chunk.chunk_id}] 指出，{preview}..."
-            )
+        # 每篇（去重后）文献一句话 + 引用
+        for summary in selected:
+            preview = (summary.text or "").replace("\n", " ").strip()[:40]
+            for citation in summary.citations:
+                citations.append(citation)
+                sentences.append(
+                    f"文献 [{citation.doc_id}, {citation.chunk_id}] 指出，{preview}..."
+                )
 
         # 章节小结
         sentences.append("综合来看，该方向已有较多探索，但仍存在改进空间。")
 
-        text = "".join(sentences)
         return Paragraph(
             section_id=section.section_id,
-            text=text,
+            text="".join(sentences),
             citations=citations,
         )
 
@@ -789,6 +922,12 @@ def create_review_generator(mode: str = "auto", **kwargs) -> BaseReviewGenerator
         if generator._ensure_client():
             return generator
         logger.info("auto 模式：LLM 不可用，降级为 MockReviewGenerator")
-        return MockReviewGenerator()
+        # 降级时保留 embedder，让 Reduce 阶段 MMR 仍能真正执行（可观测不静默）
+        fallback_kwargs: Dict = {}
+        if kwargs.get("embedder") is not None:
+            fallback_kwargs["embedder"] = kwargs["embedder"]
+        if "mmr_lambda" in kwargs:
+            fallback_kwargs["mmr_lambda"] = kwargs["mmr_lambda"]
+        return MockReviewGenerator(**fallback_kwargs)
 
     raise ValueError(f"未知 review generator mode: {mode}")

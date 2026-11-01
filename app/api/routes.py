@@ -35,9 +35,12 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型检查时导入，避免启动时加载重组件
+    from ..rag.context_manager import ContextManager
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +165,10 @@ class AskResponse:
     """论文问答响应
 
     model/input_tokens/output_tokens/cost_yuan 用于前端展示本次调用成本；
-    memory_used 标注是否注入了会话历史（文档第 2 章"基于记忆池的长文问答"）。
+    memory_used 标注是否注入了记忆池/会话历史（文档第 2 章"基于记忆池的长文问答"）；
+    memory_entities 为本次实际注入记忆池（ContextManager）的实体条目数，
+    mock 与真实 RAG 分支都会真实统计（P0-2 接线后可观测）；
+    memory_items 为历史字段名兼容别名（与 memory_entities 同值，保留避免破坏旧调用方）。
     """
 
     answer: str = ""
@@ -176,6 +182,8 @@ class AskResponse:
     cost_yuan: float = 0.0
     mock_mode: bool = False
     memory_used: bool = False
+    memory_entities: int = 0
+    memory_items: int = 0  # 兼容别名：等于 memory_entities
     error: str = ""
 
 
@@ -202,7 +210,21 @@ class ReviewRequest:
 
 @dataclass
 class ReviewResponse:
-    """综述生成响应"""
+    """综述生成响应
+
+    P0-3/P0-4 接线后可观测字段（均有默认值，保证既有调用方零改动）：
+    - generator_mode: 本次实际使用的生成器模式（"mock" / "llm"），来自真实
+      generator 实例类型而非入参，便于确认 mock 路径与 LLM 路径的差异；
+    - mmr_enabled: 本次请求是否具备 MMR 去重条件（embedder 已传入且生成器
+      具备 MMR 路径；LLM/Mock 生成器均已接入）。它表示"能力已启用"，不代表
+      本次一定执行了去重——实际是否执行看 dedup_stats.calls / mmr_applied；
+    - mmr_applied: 本次综述生成是否真正执行过 MMR 去重（= dedup_stats.calls > 0）；
+    - dedup_stats: MMR 统计 {mmr_applied, calls, input_summaries,
+      selected_summaries, skipped, reduce_top_k, mmr_lambda}，跳过也会计数；
+    - verification_skipped: 是否因无可用 chunks/检索器等原因跳过引用事实验证；
+    - verification_skip_reason: 跳过原因（未跳过时为空串）；
+    - verification_error: 历史字段名兼容别名（= verification_skip_reason）。
+    """
 
     title: str = ""
     full_text: str = ""
@@ -212,6 +234,13 @@ class ReviewResponse:
     citation_stats: Dict[str, int] = field(default_factory=dict)
     references: List[Dict] = field(default_factory=list)
     verified: bool = False
+    generator_mode: str = ""
+    mmr_enabled: bool = False
+    mmr_applied: bool = False
+    dedup_stats: Dict = field(default_factory=dict)
+    verification_skipped: bool = False
+    verification_skip_reason: str = ""
+    verification_error: str = ""  # 兼容别名：等于 verification_skip_reason
     docx_path: str = ""
     docx_b64: str = ""
     docx_mode: str = ""
@@ -504,10 +533,12 @@ def create_app(*, mock_mode: Optional[bool] = None):
         if not body.question.strip():
             return AskResponse(error="question 不能为空")
 
-        # mock 模式：返回模板化回答
+        # mock 模式：返回模板化回答（P0-2：同样从该 doc 的记忆池注入实体）
         if state.mock_mode:
             return state.mock_ask(
                 body.paper_id, body.question, body.user_id,
+                use_memory=body.use_memory,
+                history=body.history,
             )
 
         # 真实模式：调 RAG + LLM（history 用于记忆池注入）
@@ -540,7 +571,14 @@ def create_app(*, mock_mode: Optional[bool] = None):
         if not body.topic.strip():
             return ReviewResponse(error="topic 不能为空")
         if not body.doc_ids:
-            return ReviewResponse(error="doc_ids 不能为空")
+            # 无 doc 时显式标记引用验证跳过（而不是静默返回 False），便于前端解释
+            skip_reason = "未提供 doc_ids（无可用文献），引用事实验证被跳过"
+            return ReviewResponse(
+                error="doc_ids 不能为空",
+                verification_skipped=True,
+                verification_skip_reason=skip_reason,
+                verification_error=skip_reason,
+            )
 
         # mock 模式 / 真实模式 都走 ReviewPipeline（pipeline 内部自动降级）
         try:
@@ -843,6 +881,52 @@ MOCK_VLM_FORMULAS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 记忆池 prompt 解析辅助（P0-2：记忆池接入 /upload + /ask）
+# ---------------------------------------------------------------------------
+
+
+def _count_memory_items(memory_prompt: str, question: str) -> int:
+    """统计 ContextManager.build_prompt 实际注入的实体条目数
+
+    build_prompt 命中实体时返回：
+        "已知信息：\\n- [type] value (来源: chunk_id)\\n...\\n\\n问题：..."
+    未命中时原样返回 question，因此需要排除"原样返回问题"的情况。
+
+    Args:
+        memory_prompt: memory.build_prompt 的返回值
+        question: 原始问题（用于识别未命中时的原样返回）
+    Returns:
+        实际注入的实体条目数（未注入为 0）
+    """
+    if not memory_prompt or memory_prompt == question:
+        return 0
+    return sum(
+        1 for line in memory_prompt.splitlines()
+        if line.lstrip().startswith("- [")
+    )
+
+
+def _extract_memory_entity_values(memory_prompt: str, limit: int = 5) -> List[str]:
+    """从记忆池 prompt 中提取实体值（用于 mock 回答里的实体预览）
+
+    行格式："- [dataset] ImageNet-1K (来源: doc_xxx#0.0)"，
+    这里取 "] " 与 " (来源:" 之间的实体值，最多 limit 个。
+    """
+    values: List[str] = []
+    for line in memory_prompt.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ["):
+            continue
+        rest = stripped[stripped.find("]") + 1:].strip()
+        value = rest.split(" (来源:")[0].strip()
+        if value:
+            values.append(value)
+        if len(values) >= limit:
+            break
+    return values
+
+
 class _AppState:
     """FastAPI 应用状态容器
 
@@ -859,6 +943,12 @@ class _AppState:
         self.mock_mode = mock_mode or not bool(os.getenv("DASHSCOPE_API_KEY", ""))
         # 进程内文档索引：{doc_id: {"title": str, "chunks": [Chunk, ...]}}
         self._docs: Dict[str, Dict] = {}
+        # 进程内记忆池索引（P0-2 接线）：{doc_id: ContextManager}，上传时按 chunk
+        # 抽取实体写入；与 _docs 共用 _docs_lock 保护，保证 /ask 读到的记忆池与
+        # chunks 一致。对外通过 get_context_manager(doc_id) 读取。
+        self._context_managers: Dict[str, "ContextManager"] = {}
+        # 历史字段名兼容别名（与 _context_managers 指向同一 dict，避免覆盖旧引用）
+        self._memories = self._context_managers
         self._docs_lock = threading.Lock()
         # 可注入组件（测试可替换；None 时按需懒加载）
         self._embedder = None
@@ -907,9 +997,62 @@ class _AppState:
         return self._cost_tracker
 
     def _index_doc(self, doc_id: str, title: str, chunks) -> None:
-        """把分块结果写入进程内文档索引"""
+        """把分块结果写入进程内文档索引，并按 doc_id 重建记忆池（P0-2）
+
+        实现要点：
+        - 实体抽取在锁外完成（CPU 开销，避免阻塞其他请求），随后在
+          _docs_lock 内**一次性**写入 _docs 与 _context_managers，保证两者一致；
+        - 同一 doc_id 重复上传时覆盖重建（旧实体不残留）；
+        - 单 chunk 抽取失败只记 warning，不影响上传主流程。
+        """
+        chunks_list = list(chunks)
+        memory = self._build_doc_memory(doc_id, chunks_list)
         with self._docs_lock:
-            self._docs[doc_id] = {"title": title, "chunks": list(chunks)}
+            self._docs[doc_id] = {"title": title, "chunks": chunks_list}
+            self._context_managers[doc_id] = memory
+
+    def _build_doc_memory(self, doc_id: str, chunks) -> Any:
+        """按 chunk 抽取实体构建文档记忆池
+
+        Args:
+            doc_id: 文档 ID
+            chunks: Chunk 列表（需有 text / chunk_id 属性）
+        Returns:
+            ContextManager（即使全部抽取失败也返回空池实例，/ask 可安全降级）
+        """
+        from ..rag.context_manager import ContextManager
+
+        memory = ContextManager(max_size=200)
+        for chunk in chunks:
+            text = getattr(chunk, "text", "") or ""
+            chunk_id = getattr(chunk, "chunk_id", "") or ""
+            try:
+                memory.update(text, chunk_id)
+            except Exception as e:  # noqa: BLE001 - 抽取失败不得中断上传
+                logger.warning(
+                    "记忆池实体抽取失败（已跳过该 chunk）：doc_id=%s, chunk_id=%s, err=%s",
+                    doc_id, chunk_id, e,
+                )
+        logger.info(
+            "记忆池构建完成：doc_id=%s, chunks=%d, entities=%d",
+            doc_id, len(chunks), len(memory),
+        )
+        return memory
+
+    def get_context_manager(self, doc_id: str):
+        """按 doc_id 取该文献的 ContextManager 记忆池（P0-2 接线，线程安全）
+
+        Args:
+            doc_id: 上传时确定的文档 ID
+        Returns:
+            ContextManager 实例；未上传/尚未解析/无索引时返回 None（调用方安全降级）
+        """
+        with self._docs_lock:
+            return self._context_managers.get(doc_id)
+
+    def get_doc_memory(self, doc_id: str):
+        """历史方法名兼容别名：等价于 get_context_manager(doc_id)"""
+        return self.get_context_manager(doc_id)
 
     def get_doc_chunks(self, doc_id: str):
         """按 doc_id 取 chunks（供真实 run_ask / run_review 使用）"""
@@ -1053,8 +1196,9 @@ class _AppState:
     ) -> Dict:
         """Agent 工具 generate_review：复用 /review 的 run_review 编排
 
-        mock 模式临时清空 DASHSCOPE_API_KEY（finally 恢复），让 ReviewPipeline
-        的 auto 选型降级到 mock 组件，保证 Agent 演示 0 次真实 LLM 调用。
+        run_review 已按 self.mock_mode 显式选择 mode="mock"（MockOutlinePlanner +
+        MockReviewGenerator + FakeEmbedder + 规则化 NLI），因此这里不再通过
+        清空环境变量强制 mock——显式 mock_mode 在 Windows 下同样可靠。
         """
         try:
             num_sections = int(num_sections or 3)
@@ -1062,21 +1206,14 @@ class _AppState:
             num_sections = 3
         num_sections = max(1, min(num_sections, 6))
 
-        saved_key: Optional[str] = None
-        if self.mock_mode:
-            saved_key = os.environ.pop("DASHSCOPE_API_KEY", None)
-        try:
-            response = self.run_review(
-                topic=topic or "",
-                doc_ids=list(doc_ids or []),
-                user_id="",
-                num_sections=num_sections,
-                verify_citations=False,
-                export_docx=False,
-            )
-        finally:
-            if saved_key is not None:
-                os.environ["DASHSCOPE_API_KEY"] = saved_key
+        response = self.run_review(
+            topic=topic or "",
+            doc_ids=list(doc_ids or []),
+            user_id="",
+            num_sections=num_sections,
+            verify_citations=False,
+            export_docx=False,
+        )
         return {
             "title": response.title,
             "full_text": response.full_text,
@@ -1212,18 +1349,49 @@ class _AppState:
             parse_mode="vlm",
         )
 
-    @staticmethod
     def mock_ask(
+        self,
         paper_id: str,
         question: str,
         user_id: str,
+        use_memory: bool = True,
+        history: Optional[List[Dict]] = None,
     ) -> AskResponse:
-        """mock 模式问答响应"""
+        """mock 模式问答响应（P0-2：同样从记忆池注入实体，可离线验证）
+
+        - 该 doc 有记忆池且命中相关实体：memory_used=True、memory_entities=N，
+          模板回答**前缀**附「（记忆池已注入 N 条实体：实体1、实体2…）」；
+        - 无该 doc / 无相关实体：安全降级（memory_used=False、memory_entities=0），
+          仍返回模板回答，不报错。
+        - memory_items 为历史字段名兼容别名（与 memory_entities 同值）。
+        注意：mock 路径不真实消费 history（只有真实 run_ask 会把会话历史拼进
+        prompt），因此 memory_used 只反映记忆池是否真的注入了实体。
+        """
+        memory_entities = 0
+        memory_prompt = ""
+        if use_memory:
+            memory = self.get_context_manager(paper_id)
+            if memory is not None:
+                try:
+                    memory_prompt = memory.build_prompt(question, top_k=10)
+                    memory_entities = _count_memory_items(memory_prompt, question)
+                except Exception as e:  # noqa: BLE001 - 记忆池异常不得影响问答
+                    logger.warning("mock_ask 记忆池注入失败（降级为纯模板回答）: %s", e)
+                    memory_entities = 0
+
         preview = question.strip().replace("\n", " ")[:60]
         answer = (
             f"[Mock 回答] 关于「{preview}...」的模板化回答。"
             f"实际部署需配置 DASHSCOPE_API_KEY 后由 Qwen-Plus 生成。"
         )
+        if memory_entities > 0:
+            # P0-2 契约：实体摘要拼进 mock 答案前缀，直观体现记忆池已生效
+            entity_values = _extract_memory_entity_values(memory_prompt)
+            answer = (
+                f"（记忆池已注入 {memory_entities} 条实体："
+                f"{'、'.join(entity_values) if entity_values else ''}…）"
+                + answer
+            )
         return AskResponse(
             answer=answer,
             citations=[],
@@ -1235,7 +1403,9 @@ class _AppState:
             output_tokens=max(1, len(answer) // 4),
             cost_yuan=0.0,
             mock_mode=True,
-            memory_used=False,
+            memory_used=memory_entities > 0,
+            memory_entities=memory_entities,
+            memory_items=memory_entities,  # 兼容别名
         )
 
     # ------------------------------------------------------------------
@@ -1548,8 +1718,11 @@ class _AppState:
 
         文档第 3 章架构图：User → RAG 检索 → 记忆池 → LLM。
         按 paper_id 从进程内索引取 chunks → 向量检索 → LLM 生成。
+        记忆池（P0-2）：上传时按 chunk 建好的 ContextManager 按问题检索实体
+        （top_k=10），注入 prompt 的"记忆池实体"块；memory_entities 记录注入条目数
+        （响应同时保留历史字段名 memory_items 作为兼容别名）。
         history 为前端会话记忆（[{"q": str, "a": str}, ...]），
-        启用记忆池时把最近 3 轮 Q/A 注入 prompt 前缀。
+        启用记忆池时把最近 3 轮 Q/A 注入 prompt 前缀（既有行为保留）。
         """
         chunks = self.get_doc_chunks(paper_id)
         if not chunks:
@@ -1571,10 +1744,32 @@ class _AppState:
 
             ctx = "\n".join(f"[{c.chunk.chunk_id}] {c.chunk.text}" for c in retrieved)[:3000]
 
-            # 记忆池注入：格式与前端现有逻辑保持一致（最近 3 轮 Q/A）
+            # --- P0-2 记忆池实体注入（文档 4.2 节"关键实体主动注入视野"）---
+            # 注入位置：会话 history 前缀之后、参考正文之后、问题之前。
+            # memory_prompt 自带"问题：..."行，作为"已知信息"块放在正文后，
+            # 最终仍由末尾统一的问题行收尾（重复问题仅作强调，不影响 LLM 语义）。
+            # 放在正文后还避免影响依赖 prompt"参考正文"前缀的 mock LLM 引用回显。
+            memory_entities = 0
+            memory_block = ""
+            if use_memory:
+                memory = self.get_context_manager(paper_id)
+                if memory is not None:
+                    try:
+                        memory_prompt = memory.build_prompt(question, top_k=10)
+                        memory_entities = _count_memory_items(memory_prompt, question)
+                        if memory_entities > 0:
+                            memory_block = (
+                                f"—— 记忆池实体（{memory_entities} 条）：\n"
+                                f"{memory_prompt}\n——\n\n"
+                            )
+                    except Exception as e:  # noqa: BLE001 - 降级为纯 RAG，不报错
+                        logger.warning("记忆池注入失败（降级为纯 RAG）: %s", e)
+                        memory_entities = 0
+
+            # 会话历史注入：格式与前端现有逻辑保持一致（最近 3 轮 Q/A）
             history = history or []
             memory_prefix = ""
-            memory_used = False
+            history_used = False
             if use_memory and history:
                 recent = history[-3:]
                 memory_prefix = "—— 会话上下文（最近 3 轮）：\n" + "\n".join(
@@ -1582,12 +1777,17 @@ class _AppState:
                     f"A{i + 1}: {str(h.get('a', ''))[:80]}"
                     for i, h in enumerate(recent)
                 ) + "\n——\n"
-                memory_used = True
+                history_used = True
+
+            # memory_used 语义 = 本次是否真的注入了记忆上下文（实体池或会话历史）
+            memory_used = memory_entities > 0 or history_used
 
             llm = self._ensure_llm()
             system = "你是学术问答助手。仅根据参考论文正文回答问题，并在关键结论处附 [chunk_id] 引用。"
             prompt = (
-                f"{memory_prefix}参考正文（chunk_id 前缀标注）：\n---\n{ctx}\n---\n\n"
+                f"{memory_prefix}"
+                f"参考正文（chunk_id 前缀标注）：\n---\n{ctx}\n---\n\n"
+                f"{memory_block}"
                 f"问题：{question}\n\n"
                 f"要求：答案 50-150 字，使用 [chunk_id] 作为引用编号。"
             )
@@ -1636,6 +1836,8 @@ class _AppState:
                 cost_yuan=resp.cost_yuan,
                 mock_mode=False,
                 memory_used=memory_used,
+                memory_entities=memory_entities,
+                memory_items=memory_entities,  # 兼容别名
                 error=resp.error,
             )
         except Exception as e:  # noqa: BLE001
@@ -1651,7 +1853,13 @@ class _AppState:
         verify_citations: bool,
         export_docx: bool,
     ) -> ReviewResponse:
-        """综述生成（mock 模式同样走，pipeline 内部自动降级）"""
+        """综述生成（mock 模式同样走，pipeline 内部自动降级）
+
+        P0-3/P0-4 接线：本方法构造共享 embedder + retriever 传给
+        create_review_pipeline，使 Map-Reduce 的 MMR 去重与 CitationVerifier
+        的二次检索/NLI 三色判定真正执行；响应透出 dedup_stats /
+        mmr_applied / verification_skipped / verification_error 供验证。
+        """
         import base64 as _base64
         import re as _re
         import time as _time
@@ -1670,16 +1878,46 @@ class _AppState:
                 doc_infos.append({"doc_id": did, "title": f"文献 {did}（未解析）"})
                 doc_chunks[did] = []
 
+        # --- P0-3 / P0-4 接线：构造共享 embedder + retriever ---
+        # 背景：此前 retriever=None / embedder=None 传入 create_review_pipeline，
+        # 导致 generator 的 MMR 去重与 CitationVerifier 的二次检索/NLI 被静默跳过。
+        # 现在按本次 doc_chunks 建索引：
+        # - mock 模式用 FakeEmbedder（确定性哈希向量，0 次真实 API 调用）；
+        # - 真实模式复用进程内 embedder（DashScope text-embedding-v3）。
+        from ..rag.embedder import FakeEmbedder
+        from ..rag.retriever import HybridRetriever
+
+        embedder = None
+        retriever = None
+        try:
+            embedder = FakeEmbedder(dim=64) if self.mock_mode else self._ensure_embedder()
+            retriever = HybridRetriever(embedder, use_bm25=True, reranker=None)
+            all_chunks = [c for chunks in doc_chunks.values() for c in chunks]
+            if all_chunks:
+                retriever.add_chunks(all_chunks)
+        except Exception as e:  # noqa: BLE001 - 构造失败降级为纯生成，不返回 500
+            logger.warning("综述检索器构造失败（降级为无 MMR/无引用验证）: %s", e)
+            embedder = None
+            retriever = None
+
         # 调 ReviewPipeline
         try:
+            from ..review.generator import REDUCE_TOP_K
             from ..review.pipeline import create_review_pipeline
             t0 = _time.time()
             pipeline = create_review_pipeline(
-                retriever=None,  # API 层不直接持有 retriever
-                embedder=None,
-                mode="auto",
+                retriever=retriever,
+                embedder=embedder,
+                mode="auto" if not self.mock_mode else "mock",
                 verify_citations=verify_citations,
             )
+            # mock 模式强制规则化 NLI（NoopReranker：chunk 存在 → neutral，
+            # chunk 不存在 → contradiction）。这样即使开发机 .env 里配了真实 key，
+            # mock 请求也绝不触达真实大模型 NLI API。
+            if self.mock_mode and pipeline.citation_verifier is not None:
+                from ..rag.reranker import NoopReranker
+                pipeline.citation_verifier.nli_reranker = NoopReranker()
+
             document = pipeline.run(
                 topic=topic,
                 doc_infos=doc_infos,
@@ -1717,6 +1955,38 @@ class _AppState:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("Word 导出失败: %s", e)
 
+            # --- P0-3 MMR 统计：成功执行/跳过都计数，不允许静默 ---
+            mmr_stats = getattr(pipeline.generator, "mmr_stats", None) or {}
+            mmr_calls = int(mmr_stats.get("calls", 0) or 0)
+            dedup_stats: Dict[str, Any] = {
+                "mmr_applied": bool(mmr_calls),
+                "calls": mmr_calls,
+                "input_summaries": int(mmr_stats.get("input_summaries", 0) or 0),
+                "selected_summaries": int(
+                    mmr_stats.get("selected_summaries", 0) or 0
+                ),
+                "skipped": int(mmr_stats.get("skipped", 0) or 0),
+                "reduce_top_k": int(
+                    getattr(pipeline.generator, "REDUCE_TOP_K", REDUCE_TOP_K)
+                ),
+                "mmr_lambda": getattr(pipeline.generator, "mmr_lambda", 0.7),
+            }
+
+            # --- P0-4 引用验证状态：retriever 已传 → CitationVerifier 自动创建 ---
+            verification_skipped = bool(
+                verify_citations and pipeline.citation_verifier is None
+            )
+            verification_error = ""
+            if verification_skipped:
+                verification_error = (
+                    "未提供 retriever" if retriever is None
+                    else "CitationVerifier 创建失败"
+                )
+                logger.warning("综述引用验证被跳过: %s", verification_error)
+            # verified 语义自洽：verify_citations=False 或验证被跳过时一律 False；
+            # 其余情况采用 pipeline 的真实验证结果（不静默改成 False）
+            verified = bool(document.verified) and not verification_skipped
+
             return ReviewResponse(
                 title=document.title,
                 full_text=document.full_text,
@@ -1725,7 +1995,11 @@ class _AppState:
                 paragraphs=document.paragraphs,
                 citation_stats=document.citation_stats,
                 references=document.references,
-                verified=document.verified,
+                verified=verified,
+                mmr_applied=dedup_stats["mmr_applied"],
+                dedup_stats=dedup_stats,
+                verification_skipped=verification_skipped,
+                verification_error=verification_error,
                 docx_path=docx_path,
                 docx_b64=docx_b64,
                 docx_mode=docx_mode,
