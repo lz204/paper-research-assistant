@@ -1,7 +1,7 @@
 # =====================================================================
 # 多语种文献翻译与论文研读助手 — GitHub Actions CI
-# 文档 6.4 节：每次 push 自动跑核心模块单测（覆盖率 > 85%），
-#              评测集因跑一次约 30 分钟，改为 nightly job
+# push: 单测 + ruff 基础正确性检查 + pytest 覆盖率门禁 + docker build（非阻断）
+# nightly: 真实 DashScope 评测（约 30 分钟；未配置 key 时只提示，不阻断）
 # =====================================================================
 
 name: CI
@@ -47,16 +47,21 @@ jobs:
           # 注意：lock 已含 streamlit==1.50.0（与 fastapi 0.110 / starlette 0.36 兼容），
           # 不要再单独 pip install streamlit（会拉到 1.51+ 并升级 starlette 导致测试崩溃）
           pip install -r requirements.lock
-          # pytest 回归测试 + 覆盖率（企业级工程化配套）
-          pip install pytest pytest-cov coverage
+          # pytest 回归测试 + 覆盖率 + ruff 基础正确性检查
+          pip install pytest pytest-cov coverage ruff
 
       - name: Verify syntax
         run: python -m compileall -q app tests
 
-      - name: Run pytest regression (core)
+      - name: Lint (ruff minimal correctness)
+        # 全量 ruff 规则待清理（历史风格告警多）；先守住语法/未定义名/严重错误
+        run: python -m ruff check app tests --select E9,F63,F7,F82
+
+      - name: Run pytest regression (core) + coverage gate
         # 不显式传路径：pytest 使用 pyproject testpaths=tests/unit，
-        # 只收集 test_*.py，避免误扫 e2e 脚本与带参的 verify_*.py
-        run: python -m pytest -v
+        # 只收集 test_*.py，避免误扫 e2e 脚本与带参的 verify_*.py。
+        # 覆盖率门槛 55% 为 pytest-only 口径；合并 verify 后的核心模块门控见 nightly
+        run: python -m pytest -v --cov=app --cov-report=term --cov-fail-under=55
 
       - name: Run context_manager test
         run: python tests/unit/verify_context_manager.py
@@ -89,7 +94,26 @@ jobs:
         run: python tests/e2e/test_e2e_mock.py
 
   # -------------------------------------------------------------------
-  # Job 2：Nightly 全量评测（文档 6.4 节，约 30 分钟）
+  # Job 2：Docker 构建证据（非阻断；首次运行后确认结果，稳定后可改阻断）
+  # -------------------------------------------------------------------
+  docker-build:
+    name: Docker Build (non-blocking evidence)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t paper-research-assistant:ci .
+
+      - name: Validate compose config
+        run: docker compose config
+
+  # -------------------------------------------------------------------
+  # Job 3：Nightly 全量评测（文档 6.4 节，约 30 分钟）
   # -------------------------------------------------------------------
   nightly-eval:
     name: Nightly Eval (DashScope real API)

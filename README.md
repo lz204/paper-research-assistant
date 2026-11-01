@@ -58,7 +58,7 @@ flowchart LR
 | Agent / MCP | LangGraph 1.2.9 + 手写 ReAct；DashScope Function Calling；手写 stdio JSON-RPC |
 | 数据 / 导出 | PostgreSQL 16 / pgvector / Redis 均接口预留；python-docx + GB/T 7714-2015 |
 | 可选增强 | spaCy `en_core_web_sm`、structlog、Langfuse（未装时分别降级纯正则 / 标准 logging / mock） |
-| 测试 / CI | pytest、coverage（核心模块门控）、GitHub Actions（push 单测 + nightly 真实评测） |
+| 测试 / CI | pytest（92 项）、coverage（pytest 门禁 55% + 核心模块门控 85%）、ruff（基础正确性）、GitHub Actions（push 单测/覆盖率/ruff + docker-build 非阻断 + nightly 真实评测） |
 
 ## 快速开始
 
@@ -123,7 +123,7 @@ Linux / macOS：`make test`、`make test-pytest`、`make e2e-mock`、`make eval`
 
 > **Agent 真实评测口径**：qwen-plus + 固定假工具后端，6 条脚本化任务的编排冒烟（success 100% / tool selection 100% / avg 2.67 步 / ¥0.0156 每任务）；样本小，不代表端到端文档问答质量，且会产生少量 API 费用。mock 与 real 指标不可混用。
 
-**CI（GitHub Actions）**：push / pull_request 只跑 unit-tests（pytest + 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock）；nightly 跑 verify + pytest --cov，覆盖率门控 `continue-on-error: true`，真实 E2E 与 nightly 评测均 `|| true` 兜底并上传报告 artifact；无覆盖率 push 门控、无 docker-build job。前端无自动化 UI 测试，验证方式为人工冒烟 / 本地启动确认主流程。
+**CI（GitHub Actions）**：push / pull_request 跑 unit-tests（pytest 92 项 + 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock），并接 ruff 基础正确性检查（E9/F63/F7/F82）与 pytest 覆盖率门禁（`--cov-fail-under=55`，pytest-only 口径）；另有非阻断 `docker-build` job（`docker build` + `docker compose config`，首次运行后看结果）；nightly 跑 verify + pytest --cov，核心模块门控 `continue-on-error`，真实 E2E 与评测 `|| true` 兜底并上传报告 artifact。前端无自动化 UI 测试，验证方式为人工冒烟。
 
 ## 目录结构
 

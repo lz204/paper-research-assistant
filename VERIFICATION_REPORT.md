@@ -191,11 +191,11 @@ python tests/eval/run_agent_eval.py --mode real
 
 | 项 | 结果 |
 | --- | --- |
-| CI 覆盖真实性 | unit-tests job 从 `requirements.lock` 安装完整依赖，跑 pytest + 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock；nightly 跑真实评测（失败不阻断） |
+| CI 覆盖真实性 | unit-tests job 从 `requirements.lock` 安装完整依赖，跑 ruff 基础正确性检查 + pytest（92 项，覆盖率门禁 55%）+ 5 个 verify + 补齐模块验证 + Agent 验证 / mock 评测 + E2E mock；docker-build job 非阻断；nightly 跑真实评测（失败不阻断） |
 | 依赖可复现 | `requirements.lock` 直接依赖精确 pin（含 pdfplumber 0.11.9 / streamlit / plotly / langgraph / langchain-core）；CI 从 lock 安装 |
 | 测试体系 | `pyproject.toml` 只收 tests/unit/test_*.py，避免误收带参 verify 脚本；conftest mock 隔离 |
 | 覆盖率门控 | `scripts/check_coverage.py` + `make coverage-check`（核心 3 模块 ≥85%） |
-| 静态检查 | ruff / mypy 配置于 pyproject，pre-commit 配置于 `.pre-commit-config.yaml`；**未接入 CI** |
+| 静态检查 | ruff 基础正确性检查（E9/F63/F7/F82）已接入 CI；mypy 仍未接入；pre-commit 配置于 `.pre-commit-config.yaml` |
 | 仓库卫生 | `.gitignore` 忽略 .env / 覆盖率产物 / PDF（版权不入库）；dev 依赖见 `requirements-dev.txt` |
 | 文档一致性 | 修正与实际不符的架构 / 依赖 / 语料规模表述；补充可选依赖、未实机构建与前端验证方式的口径 |
 
