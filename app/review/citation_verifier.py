@@ -11,7 +11,8 @@
 文档 6.5 节"引用溯源不可伪造"：
 - LLM 生成综述时，Prompt 强制要求每条引用输出格式为 [doc_id, chunk_id]
 - 生成后，citation_verifier 对每个引用执行二次检索：
-  从 pgvector 中按 chunk_id 拉取原文片段，并与综述段落做 NLI 一致性校验
+  从当前检索器（默认 InMemoryVectorRetriever；pgvector 为预留生产实现）按 chunk_id
+  回查原文片段，并与综述段落做 NLI 一致性校验
 - 只有同时满足"chunk_id 真实存在"和"NLI 判定为 entailment"的引用，
   才在前端渲染为蓝色可点击标签
 

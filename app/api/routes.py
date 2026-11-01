@@ -1857,8 +1857,15 @@ class _AppState:
 
         P0-3/P0-4 接线：本方法构造共享 embedder + retriever 传给
         create_review_pipeline，使 Map-Reduce 的 MMR 去重与 CitationVerifier
-        的二次检索/NLI 三色判定真正执行；响应透出 dedup_stats /
-        mmr_applied / verification_skipped / verification_error 供验证。
+        的二次检索/NLI 三色判定真正执行；响应透出：
+        - generator_mode: 实际生成器模式（"mock"/"llm"，按 pipeline.generator 类型判断）；
+        - mmr_enabled: MMR 能力是否启用（LLM 生成器路径 + embedder 已传 → True；
+          MockReviewGenerator 路径固定 False，实际是否执行看 dedup_stats.calls / mmr_applied）；
+        - dedup_stats / mmr_applied: MMR 执行统计（跳过也计数，不允许静默）；
+        - verification_skipped / verification_skip_reason: 引用验证是否被跳过及原因
+          （verification_error 为同值兼容别名）。
+        本次 doc_ids 均无可用 chunks 时：不构造空 retriever，retriever/embedder 置 None，
+        显式返回 verification_skipped=True + reason，而不是静默跳过。
         """
         import base64 as _base64
         import re as _re
@@ -1883,26 +1890,35 @@ class _AppState:
         # 导致 generator 的 MMR 去重与 CitationVerifier 的二次检索/NLI 被静默跳过。
         # 现在按本次 doc_chunks 建索引：
         # - mock 模式用 FakeEmbedder（确定性哈希向量，0 次真实 API 调用）；
-        # - 真实模式复用进程内 embedder（DashScope text-embedding-v3）。
+        # - 真实模式复用进程内 embedder（DashScope text-embedding-v3）；
+        # - 本次没有任何可用 chunks（未上传/未解析）时不构造空 retriever：
+        #   retriever/embedder 保持 None，后续响应显式标记 verification_skipped。
         from ..rag.embedder import FakeEmbedder
         from ..rag.retriever import HybridRetriever
 
+        all_chunks = [c for chunks in doc_chunks.values() for c in chunks]
         embedder = None
         retriever = None
-        try:
-            embedder = FakeEmbedder(dim=64) if self.mock_mode else self._ensure_embedder()
-            retriever = HybridRetriever(embedder, use_bm25=True, reranker=None)
-            all_chunks = [c for chunks in doc_chunks.values() for c in chunks]
-            if all_chunks:
+        no_retriever_reason = ""
+        if all_chunks:
+            try:
+                embedder = FakeEmbedder(dim=64) if self.mock_mode else self._ensure_embedder()
+                retriever = HybridRetriever(embedder, use_bm25=True, reranker=None)
                 retriever.add_chunks(all_chunks)
-        except Exception as e:  # noqa: BLE001 - 构造失败降级为纯生成，不返回 500
-            logger.warning("综述检索器构造失败（降级为无 MMR/无引用验证）: %s", e)
-            embedder = None
-            retriever = None
+            except Exception as e:  # noqa: BLE001 - 构造失败降级为纯生成，不返回 500
+                logger.warning("综述检索器构造失败（降级为无 MMR/无引用验证）: %s", e)
+                embedder = None
+                retriever = None
+                no_retriever_reason = f"检索器/向量化器构造失败（{type(e).__name__}）"
+        else:
+            no_retriever_reason = "doc_ids 均未解析或没有可用 chunks"
+            logger.info(
+                "综述无可用 chunks，跳过检索器构建与引用验证: doc_ids=%s", doc_ids
+            )
 
         # 调 ReviewPipeline
         try:
-            from ..review.generator import REDUCE_TOP_K
+            from ..review.generator import REDUCE_TOP_K, MockReviewGenerator
             from ..review.pipeline import create_review_pipeline
             t0 = _time.time()
             pipeline = create_review_pipeline(
@@ -1972,17 +1988,36 @@ class _AppState:
                 "mmr_lambda": getattr(pipeline.generator, "mmr_lambda", 0.7),
             }
 
+            # --- P0-3/P0-4 契约字段：生成器模式 / MMR 是否启用 / 引用验证跳过原因 ---
+            # generator_mode 按 pipeline.generator 的**实际类型**判断（不依赖入参），
+            # 因此真实模式即便内部降级为 mock 组件，也能如实区分 LLM 路径与 mock 路径。
+            generator_mode = (
+                "mock" if isinstance(pipeline.generator, MockReviewGenerator) else "llm"
+            )
+            # mmr_enabled 语义（契约）：LLM 生成器路径且 embedder 已传入 → 能力启用；
+            # MockReviewGenerator 路径固定 False（避免文档把 mock 路径写成“MMR 已生效”）。
+            # 实际是否执行 MMR 看 dedup_stats.calls / mmr_applied（跳过也计数）。
+            mmr_enabled = bool(
+                embedder is not None
+                and not isinstance(pipeline.generator, MockReviewGenerator)
+            )
+
             # --- P0-4 引用验证状态：retriever 已传 → CitationVerifier 自动创建 ---
             verification_skipped = bool(
                 verify_citations and pipeline.citation_verifier is None
             )
-            verification_error = ""
+            verification_skip_reason = ""
             if verification_skipped:
-                verification_error = (
-                    "未提供 retriever" if retriever is None
-                    else "CitationVerifier 创建失败"
-                )
-                logger.warning("综述引用验证被跳过: %s", verification_error)
+                if retriever is None:
+                    verification_skip_reason = (
+                        no_retriever_reason
+                        or "未构建检索器（无可用 chunks），引用事实验证被跳过"
+                    )
+                else:
+                    verification_skip_reason = (
+                        "CitationVerifier 创建失败，引用事实验证被跳过"
+                    )
+                logger.warning("综述引用验证被跳过: %s", verification_skip_reason)
             # verified 语义自洽：verify_citations=False 或验证被跳过时一律 False；
             # 其余情况采用 pipeline 的真实验证结果（不静默改成 False）
             verified = bool(document.verified) and not verification_skipped
@@ -1996,10 +2031,13 @@ class _AppState:
                 citation_stats=document.citation_stats,
                 references=document.references,
                 verified=verified,
+                generator_mode=generator_mode,
+                mmr_enabled=mmr_enabled,
                 mmr_applied=dedup_stats["mmr_applied"],
                 dedup_stats=dedup_stats,
                 verification_skipped=verification_skipped,
-                verification_error=verification_error,
+                verification_skip_reason=verification_skip_reason,
+                verification_error=verification_skip_reason,  # 兼容别名
                 docx_path=docx_path,
                 docx_b64=docx_b64,
                 docx_mode=docx_mode,
