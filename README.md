@@ -13,8 +13,8 @@
 ## 可演示亮点（3 个）
 
 1. **公式不丢上下文**：默认文本层 + 可选 Qwen-VL（≤10 页）+ FusionEngine 融合 + FormulaBinder 四级绑定，低置信标黄；可现场演示 PDF →「正文 + LaTeX 公式 + 表格」与落点段落。
-2. **长文不遗忘**：手写 `ContextManager` KV 记忆池（入库抽实体、问答按意图注入），`/ask` 返回 `memory_used` / `memory_items` 可观测。
-3. **综述可溯源**：Map-Reduce + MMR + NLI 引用事实验证；`/review` 返回 `citation_stats` / `mmr_applied` / `verification_skipped`，引用三色标记。
+2. **长文不遗忘**：手写 `ContextManager` KV 记忆池（入库抽实体、问答按意图注入），`/ask` 返回 `memory_used` / `memory_entities`（主）/ `memory_items`（同值别名）可观测。
+3. **综述可溯源**：Map-Reduce + MMR + NLI 引用事实验证；`/review` 返回 `citation_stats` / `generator_mode` / `mmr_enabled` / `mmr_applied` / `verification_skipped` / `verification_skip_reason`，引用三色标记。
 
 > 另：Agent 助手（Function Calling + LangGraph + 手写 MCP 工具链）在前端第 6 Tab 可看工具轨迹。
 
@@ -81,8 +81,8 @@ Copy-Item .env.example .env              # 填 DASHSCOPE_API_KEY；不填自动 
 | GET | `/health` | `status` / `mock_mode` / `components`（含 parser、rag、review、llm、translation、agent） |
 | POST | `/upload` | 解析 PDF 并建索引；`doc_id`、`num_pages`、`num_chunks`、`chunks`、`vlm_used`、`formulas`、`parse_mode`（text / vlm / text_fallback） |
 | POST | `/translate` | 单段翻译（≤5000 字符）；`translated`、`aligned_terms` |
-| POST | `/ask` | 记忆池问答；`answer`、`citations`、`memory_used`、`memory_items`、`from_cache`、`cost_yuan` |
-| POST | `/review` | 综述 + 引用验证；`full_text`、`citation_stats`、`verified`、`mmr_applied`、`dedup_stats`、`verification_skipped`、`verification_error`、`docx_b64` |
+| POST | `/ask` | 记忆池问答；`answer`、`citations`、`memory_used`、`memory_entities`（主）、`memory_items`（同值别名）、`from_cache`、`cost_yuan` |
+| POST | `/review` | 综述 + 引用验证；`full_text`、`citation_stats`、`verified`、`generator_mode`、`mmr_enabled`、`mmr_applied`、`dedup_stats`、`verification_skipped`、`verification_skip_reason`、`verification_error`（同值别名）、`docx_b64` |
 | POST | `/agent` | Agent 任务；`answer`、`steps`、`tool_calls`、`framework`、`cost_yuan` |
 | GET | `/agent/tools`；POST `/agent/tools/call` | 工具列表（OpenAI tools 格式）；单工具调试 / MCP 适配 |
 | GET | `/documents`；GET `/cost/summary` | 已索引文档列表；成本看板聚合 |
@@ -95,7 +95,7 @@ Copy-Item .env.example .env              # 填 DASHSCOPE_API_KEY；不填自动 
 
 ```powershell
 $py = ".\.venv\Scripts\python.exe"
-& $py -m pytest -v                                # pytest 回归（mock；条数以实际输出为准）
+& $py -m pytest -v                                # pytest 回归（mock；92 passed / 0 failed / 0 skipped）
 foreach ($f in "context_manager","rag_pipeline","review_pipeline","parser_pipeline","infrastructure") { & $py "tests/unit/verify_$f.py" }
 & $py tests/unit/verify_completion_modules.py --mock   # 翻译 / 引用格式 / 结构拆解（28 项）
 & $py tests/unit/verify_agent_pipeline.py              # Agent 链路（66/66 断言）
@@ -110,12 +110,14 @@ Linux / macOS：`make test`、`make test-pytest`、`make e2e-mock`、`make eval`
 
 | 本机实测（mock 模式） | 结果 |
 | --- | --- |
-| pytest 回归 | 全绿（86 项；含 12 项记忆池 / MMR / NLI 接线用例） |
+| pytest 回归 | **92 passed / 0 failed / 0 skipped**（74 基线 + 12 记忆池/MMR/NLI + 6 项 P0 接线回归） |
 | 5 个模块 verify + 补齐模块验证 | 全部通过（28/28 项检查） |
 | Agent 链路 / mock 评测 / MCP 冒烟 | 66/66 断言；6/6 任务，success 100%、tool selection 100%、avg 2.17 步、¥0；initialize + 4 工具 |
 | E2E mock / 三大痛点 | 全部通过 |
-| API mock 全链路（10 端点） | 10/10 HTTP 200；/ask 记忆注入、/review 引用验证、/agent LangGraph |
+| API mock 全链路（10 端点） | 10/10 HTTP 200；/ask `memory_used=true, memory_entities=2, memory_items=2`（use_memory=false 全 0）；/review `generator_mode=mock, mmr_enabled=false, mmr_applied=false, citation_stats.total=2, verified=true`；/agent LangGraph |
 | 覆盖率门控 | context_manager 95.0% / fusion_engine 94.9% / citation_verifier 86.8%（门槛 85%） |
+
+**MMR 口径（如实）**：`MockReviewGenerator` 默认不执行 MMR（`mmr_enabled=false、mmr_applied=false、dedup_stats.calls=0、skipped=2/3`）；monkeypatch `REDUCE_TOP_K=1` 时 mock 路径可实际执行（`mmr_applied=true、calls=1、input=2、selected=1`），但 `mmr_enabled` 仍为 false（能力启用与实际执行分开）；真实 LLM 路径能力已接入，本次未用真实 Key 验证去重效果。
 
 **真实模型验证（需 key + 网络，可选）**：`python scripts/demo_real_paper.py`（Attention，15 页 / 107 chunks，单问约 ¥0.003–0.004）、`python scripts/demo_uploaded_papers.py`（28 篇 / 917 页 / 7,726 chunks）、`python tests/eval/run_eval.py --mode nightly`、`python tests/eval/run_agent_eval.py --mode real`。
 

@@ -15,7 +15,7 @@
 | 验证项 | 结论 |
 | --- | --- |
 | 三大痛点（公式上下文 / 长文遗忘 / 综述横跳） | 全部闭环（mock 场景验证，`verify_pain_points.py`） |
-| 可复现测试（pytest + verify + E2E mock + Agent mock） | 全部通过（mock 隔离，无费用） |
+| 可复现测试（pytest + verify + E2E mock + Agent mock） | **92 passed / 0 failed / 0 skipped**（mock 隔离，无费用） |
 | 核心模块覆盖率 | context_manager 95.0% / fusion_engine 94.9% / citation_verifier 86.8%（门槛 85%） |
 | 真实论文端到端（②） | 通过：Attention Is All You Need，15 页 / 107 chunks |
 | 批量真实论文（②） | 通过：28 篇 arXiv / 917 页 / 7,726 chunks，0 失败 |
@@ -44,7 +44,8 @@
 | 测试 | 命令 | 结果 |
 | --- | --- | --- |
 | 语法编译 | `python -m compileall -q app tests` | 0 错误 |
-| pytest 回归 | `python -m pytest`（pyproject testpaths=tests/unit） | 全绿；86 项（74 基线 + 12 记忆池 / MMR / NLI 接线用例） |
+| pytest 回归 | `python -m pytest`（pyproject testpaths=tests/unit） | **92 passed / 0 failed / 0 skipped**（74 基线 + 12 记忆池/MMR/NLI 接线 + 6 项 P0 接线回归） |
+| P0 接线回归 | `python -m pytest tests/unit/test_p0_wiring.py -v` | 6/6 passed：/ask `memory_entities`、/review `generator_mode` / `mmr_enabled`、无 doc skipped、pipeline retriever/embedder 接线、MMR 执行可观测 |
 | ContextManager 集成验证 | `python tests/unit/verify_context_manager.py` | exit 0 |
 | RAG 全链路验证 | `python tests/unit/verify_rag_pipeline.py` | exit 0 |
 | 综述全链路验证 | `python tests/unit/verify_review_pipeline.py` | exit 0 |
@@ -55,7 +56,7 @@
 | Agent 评测（mock） | `python tests/eval/run_agent_eval.py --mode mock` | 6/6 任务；success 100% / tool selection 100% / avg 2.17 步 / ¥0 |
 | MCP 协议冒烟 | `python scripts/agent_mcp_smoke.py` | initialize（2024-11-05）+ tools/list 4 工具通过 |
 | E2E mock（全链路） | `python tests/e2e/test_e2e_mock.py` | exit 0 |
-| API mock 全链路 | `create_app(mock_mode=True)` + TestClient | 主要端点 HTTP 200；`/ask memory_used=true, memory_items>0（实测 2~4 条）`；`/review citation_stats.total=2, dedup_stats 有值, verified=true, verification_skipped=false`；`/agent framework=langgraph`；`/agent/tools` 4 工具 |
+| API mock 全链路 | `create_app(mock_mode=True)` + TestClient | 10/10 端点 HTTP 200（最终代码复跑 15 次端点调用全 200）；`/ask memory_used=true, memory_entities=2, memory_items=2（同值别名；use_memory=false 时全 0）`；`/review generator_mode="mock", mmr_enabled=false, mmr_applied=false, dedup_stats={calls:0,skipped:2,reduce_top_k:8}, citation_stats.total=2, verified=true, verification_skipped=false`；`/agent framework=langgraph`；`/agent/tools` 4 工具 |
 
 覆盖率门控（合并 verify 脚本 + pytest 口径，`make coverage && make coverage-check`）：
 
@@ -123,14 +124,16 @@
 
 | 验收项 | 实测结果 |
 | --- | --- |
-| `/upload` → `/ask`（use_memory=true） | `memory_used=true`、`memory_items>0`（实测 2~4 条，随上传文本实体数变化），回答附记忆池实体；未上传 doc 时安全降级为空记忆、不报错 |
-| `/ask` 真实编排（注入 FakeEmbedder + RecordingLLM，不触网） | prompt 含记忆池实体 + 会话历史（最近 3 轮），`memory_items=1` |
-| `/review` 默认（2 篇，verify=true） | `citation_stats.total=2`、`verified=true`、`verification_skipped=false`；`dedup_stats={skipped:2, reduce_top_k:8}`（summaries≤8 时跳过 MMR，如实计数） |
-| `/review` MMR 生效（monkeypatch `REDUCE_TOP_K=1`） | `mmr_applied=true`、`calls=1`、`input=2`、`selected=1` |
+| `/upload` → `/ask`（use_memory=true） | `memory_used=true`、`memory_entities>0`（主字段；mock 实测 2）、`memory_items` 同值别名；回答前缀含「记忆池已注入」；未上传 doc 时安全降级为全 0、不报错 |
+| `/ask` 真实编排（注入 FakeEmbedder + RecordingLLM，不触网） | prompt 含记忆池实体 + 会话历史（最近 3 轮），`memory_entities=1`、`memory_items=1` |
+| `/review` 默认（2 篇，verify=true） | `generator_mode="mock"`、`mmr_enabled=false`、`mmr_applied=false`、`dedup_stats={calls:0, input_summaries:2, skipped:2, reduce_top_k:8, mmr_lambda:0.7}`、`citation_stats.total=2`、`verified=true`、`verification_skipped=false` |
+| `/review` MMR 实际执行（monkeypatch `REDUCE_TOP_K=1`） | `mmr_applied=true`、`dedup_stats.calls=1`、`input=2`、`selected=1`；`generator_mode="mock"` 且 `mmr_enabled=false`（能力启用与实际执行分开） |
+| `/review` 无 doc / 未解析 / 无 chunks | 不抛异常：`verification_skipped=true`、`verification_skip_reason="doc_ids 均未解析或没有可用 chunks"`、`citation_stats.total=0`、`verified=false`、`verification_error` 同值 |
+| `/review` 空 doc_ids 列表 | 仍返回参数校验 error（`doc_ids 不能为空`），同时 `verification_skipped=true` + `verification_skip_reason` 非空 |
 | `/review` 伪造引用 `[doc_ghost, doc_ghost#9.9]` | `citation_stats.contradiction=1`；references 中该引用 `exists=false`、`label=contradiction` |
 | `/review` verify_citations=false | `verified=false`、`verification_skipped=false`、`citation_stats.total=0`，不抛异常 |
 
-> 全部为 `create_app(mock_mode=True)` + TestClient 实测（新增 12 个 pytest 用例），未调用真实 API。
+> 全部为 `create_app(mock_mode=True)` + TestClient 实测（本轮新增 18 个 pytest 用例：12 记忆池/MMR/NLI + 6 P0 接线），未调用真实 API。
 
 ## 8. Agent 验证与真实评测口径
 
@@ -149,7 +152,7 @@
 **口径说明（防误用）**
 
 - Agent 评测 mock 指标是**脚本化 LLM 的编排回归指标**，不代表真实模型能力；real 模式使用真实 qwen-plus，但工具是**固定假回调**（2 篇论文 / 2 个 chunk），只反映「工具选择 + 编排 + 收敛」质量，不是端到端文档问答准确率，样本小（6 任务）不具统计意义。
-- mock 与真实生成器共用同一 MMR 实现（`_MMRReduceMixin`）：MMR 是否执行取决于每章节 summaries 数与 `REDUCE_TOP_K`。默认 2 篇文献时 summaries≤8，会跳过并在 `dedup_stats.skipped` 计数（不静默）；把 summaries 数调高（测试中 monkeypatch `REDUCE_TOP_K=1`）时 mock 路径同样执行 MMR（实测 `calls=1 / input=2 / selected=1`）。
+- MMR 如实口径：`MockReviewGenerator` 默认不执行 MMR（`mmr_enabled=false`、`mmr_applied=false`、`dedup_stats.calls=0`、`skipped=2`、`reduce_top_k=8`）；monkeypatch `REDUCE_TOP_K=1` 时 mock 路径可实际执行（`mmr_applied=true / calls=1 / input=2 / selected=1`），但 `mmr_enabled` 仍为 false（“能力启用”与“实际执行”分开）。真实 LLM 路径能力已接入，本次未用真实 Key 验证去重效果。
 - 真实评测不纳入 CI（成本原因），日常回归使用 mock；真实命令可手动执行（需 key，会产生少量费用）。
 - MCP 为手写最小协议实现（initialize / tools/list / tools/call），不等同官方 mcp 包与完整 MCP 生态；`tools/call` 依赖后端已启动并持有文档索引。
 - Docker Compose：当前执行环境 `docker` CLI 不可用，**未实际构建 / 启动容器**；Dockerfile 已改为优先按 `requirements.lock` 安装依赖，容器化路径需在安装 Docker 的机器上复验。
